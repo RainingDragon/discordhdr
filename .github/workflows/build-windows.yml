@@ -42,15 +42,9 @@ jobs:
           $injector = "build\Release\DiscordHDRFix.Injector.exe"
           $dll = "build\Release\DiscordHDRFix.Native.dll"
 
-          if (-not (Test-Path $injector)) {
-            throw "Missing build output: $injector"
-          }
+          if (-not (Test-Path $injector)) { throw "Missing build output: $injector" }
+          if (-not (Test-Path $dll)) { throw "Missing build output: $dll" }
 
-          if (-not (Test-Path $dll)) {
-            throw "Missing build output: $dll"
-          }
-
-          Write-Host "Built:"
           Get-Item $injector, $dll | Format-Table Name, Length, LastWriteTime
 
       - name: Stage downloadable package
@@ -58,7 +52,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v0.5"
+          $root = "package\DiscordHDRFix-v0.6"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -67,10 +61,8 @@ jobs:
 
           Copy-Item "build\Release\DiscordHDRFix.Injector.exe" $native
           Copy-Item "build\Release\DiscordHDRFix.Native.dll" $native
-
           Copy-Item "vencord\DiscordHDRFix\index.ts" $plugin
           Copy-Item "vencord\DiscordHDRFix\native.ts" $plugin
-
           Copy-Item "install-native.ps1" $root
           Copy-Item "ARTIFACT-README.md" $root
 
@@ -80,18 +72,13 @@ jobs:
           )
 
           $hashes |
-            ForEach-Object {
-              "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))"
-            } |
+            ForEach-Object { "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))" } |
             Set-Content -Encoding ascii (Join-Path $root "SHA256SUMS.txt")
-
-          Write-Host "Artifact contents:"
-          Get-ChildItem -Recurse $root | Select-Object FullName, Length
 
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v0.5-windows-x64
-          path: package/DiscordHDRFix-v0.5
+          name: DiscordHDRFix-v0.6-windows-x64
+          path: package/DiscordHDRFix-v0.6
           if-no-files-found: error
           retention-days: 14
