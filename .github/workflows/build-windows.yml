@@ -1,0 +1,97 @@
+name: Build DiscordHDRFix Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "native/**"
+      - "vencord/**"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure native build
+        shell: pwsh
+        run: |
+          cmake -S native -B build -A x64
+
+      - name: Compile Release binaries
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Verify outputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $injector = "build\Release\DiscordHDRFix.Injector.exe"
+          $dll = "build\Release\DiscordHDRFix.Native.dll"
+
+          if (-not (Test-Path $injector)) {
+            throw "Missing build output: $injector"
+          }
+
+          if (-not (Test-Path $dll)) {
+            throw "Missing build output: $dll"
+          }
+
+          Write-Host "Built:"
+          Get-Item $injector, $dll | Format-Table Name, Length, LastWriteTime
+
+      - name: Stage downloadable package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $root = "package\DiscordHDRFix-v0.5"
+          $native = Join-Path $root "native"
+          $plugin = Join-Path $root "vencord\DiscordHDRFix"
+
+          New-Item -ItemType Directory -Force -Path $native | Out-Null
+          New-Item -ItemType Directory -Force -Path $plugin | Out-Null
+
+          Copy-Item "build\Release\DiscordHDRFix.Injector.exe" $native
+          Copy-Item "build\Release\DiscordHDRFix.Native.dll" $native
+
+          Copy-Item "vencord\DiscordHDRFix\index.ts" $plugin
+          Copy-Item "vencord\DiscordHDRFix\native.ts" $plugin
+
+          Copy-Item "install-native.ps1" $root
+          Copy-Item "ARTIFACT-README.md" $root
+
+          $hashes = @(
+            Get-FileHash (Join-Path $native "DiscordHDRFix.Injector.exe") -Algorithm SHA256
+            Get-FileHash (Join-Path $native "DiscordHDRFix.Native.dll") -Algorithm SHA256
+          )
+
+          $hashes |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  $([System.IO.Path]::GetFileName($_.Path))"
+            } |
+            Set-Content -Encoding ascii (Join-Path $root "SHA256SUMS.txt")
+
+          Write-Host "Artifact contents:"
+          Get-ChildItem -Recurse $root | Select-Object FullName, Length
+
+      - name: Upload Windows x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiscordHDRFix-v0.5-windows-x64
+          path: package/DiscordHDRFix-v0.5
+          if-no-files-found: error
+          retention-days: 14
