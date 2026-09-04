@@ -1,0 +1,5 @@
+build/
+package/
+*.user
+.vs/
+CMakeSettings.json
