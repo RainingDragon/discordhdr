@@ -1,61 +1,51 @@
-# DiscordHDRFix v0.7 Windows x64
+# DiscordHDRFix v1.0.0 compiled Windows artifact
 
-## Install
+This is the package intended to hand to another user.
 
-Fully exit Discord, then:
+## Quick install
+
+Fully exit Discord, then run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\install-native.ps1
+.\Install-DiscordHDRFix.ps1
 ```
 
-Replace your Vencord userplugin with:
+The installer:
 
-```text
-vencord\DiscordHDRFix
-```
+1. Installs `DiscordHDRFix.Injector.exe` and `DiscordHDRFix.Native.dll` to
+   `%LOCALAPPDATA%\DiscordHDRFix`.
+2. Creates the tested defaults on a clean install:
+   - Auto HDR by DXGI format
+   - SDR white 460
+   - Input max 1000
+3. Copies the Vencord userplugin into `src\userplugins\DiscordHDRFix`.
+4. Runs `pnpm build`.
+5. Runs `pnpm inject`.
 
-Then:
+If Vencord cannot be auto-detected:
 
 ```powershell
-pnpm build
-pnpm inject
+.\Install-DiscordHDRFix.ps1 -VencordPath "C:\path\to\Vencord"
 ```
 
-Fully restart Discord.
+## Uninstall
 
-## First v0.7 test
+Fully exit Discord:
 
-Keep the luminance values that currently give the closest brightness. For the
-current test system that may be:
+```powershell
+.\Uninstall-DiscordHDRFix.ps1
+```
+
+## Expected automatic mapping
 
 ```text
-SDR white: 600
-Input max: 460
+R10G10B10A2_UNORM  -> Rec.2020 + ST.2084 / PQ
+R16G16B16A16_FLOAT -> Rec.709 + Linear / scRGB
+other formats       -> preserve Discord metadata
 ```
 
-Set:
+## Important
 
-```text
-Source color mode: Preserve Discord source metadata
-```
-
-Start Go Live, wait a few seconds, then open:
-
-```text
-Vencord Toolbox
-→ Show Native HDR Fix Status
-```
-
-Send the full status. The important new fields are:
-
-```text
-source_format_name
-original_primaries_name
-original_transfer_name
-effective_primaries_name
-effective_transfer_name
-```
-
-Once those are known, source-color modes can be switched live without
-restarting the stream.
+The native patch is version-locked to the analyzed `discord_voice.node` and fails closed
+on an unknown Discord build.

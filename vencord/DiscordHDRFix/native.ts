@@ -108,7 +108,7 @@ export async function startNativeFix(_event: Electron.IpcMainInvokeEvent) {
 export async function readNativeStatus(_event: Electron.IpcMainInvokeEvent) {
     const dir = tmpdir();
     const names = (await readdir(dir))
-        .filter(name => /^DiscordHDRFix-v07-\d+\.json$/i.test(name));
+        .filter(name => /^DiscordHDRFix-v100-\d+\.json$/i.test(name));
 
     if (names.length === 0)
         return null;

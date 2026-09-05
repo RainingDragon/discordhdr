@@ -65,9 +65,9 @@ enum class SourceColorMode : std::uint32_t {
 
 struct Config {
     bool enabled = true;
-    float white = 200.0f;
+    float white = 460.0f;
     float peak = 1000.0f;
-    SourceColorMode sourceColorMode = SourceColorMode::Preserve;
+    SourceColorMode sourceColorMode = SourceColorMode::AutoHdrByFormat;
 };
 
 using RendererFn = void* (__fastcall*)(
@@ -96,6 +96,7 @@ std::atomic<std::uint32_t> g_lastEffectiveTransfer{0xffffffffu};
 std::atomic<unsigned long long> g_rendererCalls{0};
 std::atomic<unsigned long long> g_metadataInjectedCalls{0};
 std::atomic<unsigned long long> g_sourceOverrideCalls{0};
+std::atomic<bool> g_lastOriginalHdrMetadataNull{true};
 
 std::uint8_t* g_relay = nullptr;
 
@@ -174,7 +175,7 @@ void BuildPaths() {
 
     swprintf_s(
         g_statusPath,
-        L"%sDiscordHDRFix-v07-%lu.json",
+        L"%sDiscordHDRFix-v100-%lu.json",
         temp,
         GetCurrentProcessId()
     );
@@ -204,7 +205,7 @@ Config CurrentConfig() {
 
     c.white = BitsFloat(g_whiteBits.load(std::memory_order_relaxed));
     if (!(c.white > 0.0f))
-        c.white = 200.0f;
+        c.white = 460.0f;
 
     c.peak = BitsFloat(g_peakBits.load(std::memory_order_relaxed));
     if (!(c.peak > 0.0f))
@@ -214,7 +215,7 @@ Config CurrentConfig() {
     c.sourceColorMode =
         mode <= static_cast<std::uint32_t>(SourceColorMode::Rec2020St2084)
             ? static_cast<SourceColorMode>(mode)
-            : SourceColorMode::Preserve;
+            : SourceColorMode::AutoHdrByFormat;
 
     return c;
 }
@@ -357,19 +358,25 @@ extern "C" __declspec(noinline) void* __fastcall HookRenderer(
     void* a9
 ) {
     g_rendererCalls.fetch_add(1, std::memory_order_relaxed);
+    g_lastOriginalHdrMetadataNull.store(a9 == nullptr, std::memory_order_relaxed);
+
+    std::uint8_t* source = nullptr;
+    std::uint8_t originalPrimaries = 0;
+    std::uint8_t originalTransfer = 0;
+    bool sourceChanged = false;
 
     if (a4) {
-        auto* source = static_cast<std::uint8_t*>(a4);
+        source = static_cast<std::uint8_t*>(a4);
 
         const std::uint32_t format =
             *reinterpret_cast<std::uint32_t*>(
                 source + kSourceFormatOffset
             );
 
-        const std::uint8_t originalPrimaries =
+        originalPrimaries =
             *(source + kSourcePrimariesOffset);
 
-        const std::uint8_t originalTransfer =
+        originalTransfer =
             *(source + kSourceTransferOffset);
 
         g_lastOriginalFormat.store(format, std::memory_order_relaxed);
@@ -398,8 +405,11 @@ extern "C" __declspec(noinline) void* __fastcall HookRenderer(
             effectiveTransfer
         );
 
-        if (effectivePrimaries != originalPrimaries ||
-            effectiveTransfer != originalTransfer) {
+        sourceChanged =
+            effectivePrimaries != originalPrimaries ||
+            effectiveTransfer != originalTransfer;
+
+        if (sourceChanged) {
             *(source + kSourcePrimariesOffset) = effectivePrimaries;
             *(source + kSourceTransferOffset) = effectiveTransfer;
 
@@ -436,10 +446,21 @@ extern "C" __declspec(noinline) void* __fastcall HookRenderer(
         }
     }
 
-    return g_originalRenderer(
+    // The source color override is intentionally scoped to Discord's renderer
+    // call. Restoring the descriptor afterward avoids leaking our temporary
+    // interpretation into unrelated Discord state and makes live mode changes
+    // reversible.
+    void* result = g_originalRenderer(
         a1, a2, a3, a4,
         a5, a6, a7, a8, metadata
     );
+
+    if (source && sourceChanged) {
+        *(source + kSourcePrimariesOffset) = originalPrimaries;
+        *(source + kSourceTransferOffset) = originalTransfer;
+    }
+
+    return result;
 }
 
 bool EqualBytes(
@@ -748,7 +769,7 @@ void WriteStatus() {
         sizeof(json),
         _TRUNCATE,
         "{\n"
-        "  \"version\": \"0.7\",\n"
+        "  \"version\": \"1.0.0\",\n"
         "  \"pid\": %lu,\n"
         "  \"mode\": \"hdr-metadata-plus-source-colorspace\",\n"
         "  \"hook_installed\": %s,\n"
@@ -774,7 +795,7 @@ void WriteStatus() {
         "  \"renderer_calls\": %llu,\n"
         "  \"hdr_metadata_injected\": %llu,\n"
         "  \"source_color_overrides\": %llu,\n"
-        "  \"last_original_hdr_metadata_null\": true,\n"
+        "  \"last_original_hdr_metadata_null\": %s,\n"
         "  \"error\": \"%s\"\n"
         "}\n",
         GetCurrentProcessId(),
@@ -797,6 +818,7 @@ void WriteStatus() {
         g_rendererCalls.load(std::memory_order_relaxed),
         g_metadataInjectedCalls.load(std::memory_order_relaxed),
         g_sourceOverrideCalls.load(std::memory_order_relaxed),
+        g_lastOriginalHdrMetadataNull.load(std::memory_order_relaxed) ? "true" : "false",
         g_error
     );
 
@@ -847,7 +869,7 @@ DWORD WINAPI WorkerThread(void*) {
     BuildPaths();
 
     g_whiteBits.store(
-        FloatBits(200.0f),
+        FloatBits(460.0f),
         std::memory_order_relaxed
     );
     g_peakBits.store(

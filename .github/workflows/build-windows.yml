@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix Windows x64
+name: Build DiscordHDRFix v1.0.0 Windows x64
 
 on:
   workflow_dispatch:
@@ -7,7 +7,10 @@ on:
     paths:
       - "native/**"
       - "vencord/**"
+      - "Install-DiscordHDRFix.ps1"
+      - "Uninstall-DiscordHDRFix.ps1"
       - "install-native.ps1"
+      - "README-FIRST.txt"
       - "ARTIFACT-README.md"
       - ".github/workflows/build-windows.yml"
 
@@ -42,11 +45,12 @@ jobs:
           if (-not (Test-Path $dll)) { throw "Missing $dll" }
           Get-Item $injector, $dll | Format-Table Name, Length, LastWriteTime
 
-      - name: Stage downloadable package
+      - name: Stage friend-ready package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $root = "package\DiscordHDRFix-v0.7"
+
+          $root = "package\DiscordHDRFix-v1.0.0"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -55,9 +59,14 @@ jobs:
 
           Copy-Item "build\Release\DiscordHDRFix.Injector.exe" $native
           Copy-Item "build\Release\DiscordHDRFix.Native.dll" $native
+
           Copy-Item "vencord\DiscordHDRFix\index.ts" $plugin
           Copy-Item "vencord\DiscordHDRFix\native.ts" $plugin
+
+          Copy-Item "Install-DiscordHDRFix.ps1" $root
+          Copy-Item "Uninstall-DiscordHDRFix.ps1" $root
           Copy-Item "install-native.ps1" $root
+          Copy-Item "README-FIRST.txt" $root
           Copy-Item "ARTIFACT-README.md" $root
 
           $hashes = @(
@@ -72,7 +81,7 @@ jobs:
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v0.7-windows-x64
-          path: package/DiscordHDRFix-v0.7
+          name: DiscordHDRFix-v1.0.0-windows-x64
+          path: package/DiscordHDRFix-v1.0.0
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30

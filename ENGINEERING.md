@@ -1,4 +1,4 @@
-# v0.7 engineering notes
+# DiscordHDRFix v1.0.0 engineering notes
 
 Target discord_voice.node SHA-256:
 
@@ -47,3 +47,28 @@ typed x64 hook function. The hook:
 4. Calls Discord's original renderer wrapper with every other argument intact.
 
 No texture copies, CPU readback, extra encoder, mirror window or audio changes.
+
+
+## v1.0.0 finalization
+
+Final defaults:
+
+```text
+source color mode: Auto HDR by DXGI format
+SDR white: 460
+input max luminance: 1000
+```
+
+The source descriptor primaries/transfer override is now scoped to the single renderer
+call: the original bytes are restored immediately after Discord's renderer returns.
+This prevents the diagnostic override from leaking into persistent Discord state and
+makes live mode changes reversible.
+
+The plugin still forces the proven routing:
+
+```text
+hdrCaptureMode = never
+useVideoHook = true
+useGraphicsCapture = false
+useGraphicsCaptureApiLevel = 0
+```

@@ -59,7 +59,7 @@ const settings = definePluginSettings({
     sdrWhiteLevel: {
         type: OptionType.NUMBER,
         description: "SDR/reference white value passed to Discord's native HDR shader.",
-        default: 200,
+        default: 460,
         restartNeeded: false,
         onChange: () => void pushNativeConfig()
     },
@@ -72,10 +72,10 @@ const settings = definePluginSettings({
     },
     sourceColorMode: {
         type: OptionType.SELECT,
-        description: "How the Video Hook source texture is identified to Discord's renderer. Start with Preserve; all modes can be changed live.",
+        description: "How Discord should interpret the Video Hook texture. Auto is recommended and fixes the common HDR10/scRGB cases.",
         options: [
-            { label: "Preserve Discord source metadata", value: "preserve", default: true },
-            { label: "Auto HDR by DXGI format", value: "autoHdr" },
+            { label: "Auto HDR by DXGI format (recommended)", value: "autoHdr", default: true },
+            { label: "Preserve Discord source metadata", value: "preserve" },
             { label: "Rec.709 + Linear (scRGB)", value: "rec709Linear" },
             { label: "Rec.709 + sRGB", value: "rec709Srgb" },
             { label: "Rec.2020 + Linear", value: "rec2020Linear" },
@@ -106,7 +106,7 @@ function logChanged(name: string, value: unknown, previous: unknown): void {
 
 function captureStatus(): string {
     return [
-        "DiscordHDRFix capture status v0.7",
+        "DiscordHDRFix capture status v1.0.0",
         "---------------------------------",
         `Tone map enabled:                ${settings.store.toneMapEnabled}`,
         `SDR white level:                 ${settings.store.sdrWhiteLevel}`,
@@ -131,16 +131,16 @@ async function nativeStatusText(): Promise<string> {
     try {
         const result = await Native.readNativeStatus();
         if (result == null)
-            return "DiscordHDRFix native status v0.7\n--------------------------------\nNo v0.7 native status file found yet.";
-        return `DiscordHDRFix native status v0.7\n--------------------------------\n${JSON.stringify(result, null, 2)}`;
+            return "DiscordHDRFix native status v1.0.0\n--------------------------------\nNo v1.0.0 native status file found yet.";
+        return `DiscordHDRFix native status v1.0.0\n--------------------------------\n${JSON.stringify(result, null, 2)}`;
     } catch (error) {
-        return `DiscordHDRFix native status v0.7\n--------------------------------\nFailed to read status: ${String(error)}`;
+        return `DiscordHDRFix native status v1.0.0\n--------------------------------\nFailed to read status: ${String(error)}`;
     }
 }
 
 export default definePlugin({
     name: "DiscordHDRFix",
-    description: "Fixes Discord HDR Video Hook metadata and exposes live source gamut/transfer overrides for diagnosis and correction.",
+    description: "Fixes washed-out Discord HDR Go Live streams by correcting Video Hook HDR metadata, gamut and transfer interpretation.",
     authors: [{ name: "Discord HDR Fix", id: 0n }],
     tags: ["Developers", "Voice"],
     settings,
@@ -220,8 +220,8 @@ export default definePlugin({
 
     toolboxActions: {
         "Apply HDR Runtime Settings": () => void pushNativeConfig(),
-        "AW3423DWF: True Black 400 Preset": () => setPreset(200, 460),
-        "AW3423DWF: Peak 1000 Preset": () => setPreset(200, 1000),
+        "Recommended 460 / 1000": () => setPreset(460, 1000),
+        "Reference 200 / 1000": () => setPreset(200, 1000),
         "Start Native HDR Fix": () => void startNativeFix(),
         "Show Native HDR Fix Status": () => void nativeStatusText().then(text => alert(text)),
         "Copy Combined HDR Fix Status": () => {
@@ -242,7 +242,7 @@ export default definePlugin({
         };
 
         setTimeout(() => void startNativeFix(), 1500);
-        logger.info("Started v0.7. HDR=never, Video Hook=true, Graphics Capture=false, Graphics API=0.");
+        logger.info("Started v1.0.0. Auto HDR color interpretation, HDR=never, Video Hook=true, Graphics Capture=false, Graphics API=0.");
     },
 
     stop(): void {
