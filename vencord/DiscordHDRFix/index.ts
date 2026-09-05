@@ -90,7 +90,7 @@ function logChanged(name: string, value: unknown, previous: unknown): void {
 
 function captureStatus(): string {
     return [
-        "DiscordHDRFix capture status v0.6",
+        "DiscordHDRFix capture status v0.6.1",
         "---------------------------------",
         `Tone map enabled:                ${settings.store.toneMapEnabled}`,
         `SDR white level:                 ${settings.store.sdrWhiteLevel} nits`,
@@ -114,16 +114,16 @@ async function nativeStatusText(): Promise<string> {
     try {
         const result = await Native.readNativeStatus();
         if (result == null)
-            return "DiscordHDRFix native status v0.6\n--------------------------------\nNo v0.6 native status file found yet.";
-        return `DiscordHDRFix native status v0.6\n--------------------------------\n${JSON.stringify(result, null, 2)}`;
+            return "DiscordHDRFix native status v0.6.1\n--------------------------------\nNo v0.6 native status file found yet.";
+        return `DiscordHDRFix native status v0.6.1\n--------------------------------\n${JSON.stringify(result, null, 2)}`;
     } catch (error) {
-        return `DiscordHDRFix native status v0.6\n--------------------------------\nFailed to read status: ${String(error)}`;
+        return `DiscordHDRFix native status v0.6.1\n--------------------------------\nFailed to read status: ${String(error)}`;
     }
 }
 
 export default definePlugin({
     name: "DiscordHDRFix",
-    description: "Forces D3D11 Video Hook and supplies the HDR metadata Discord omits so its own HDR→SDR shader can run.",
+    description: "Forces D3D11 Video Hook and supplies the complete HDR metadata Discord omits so its own HDR→SDR shader can run.",
     authors: [{ name: "Discord HDR Fix", id: 0n }],
     tags: ["Developers", "Voice"],
     settings,
@@ -227,7 +227,7 @@ export default definePlugin({
         };
 
         setTimeout(() => void startNativeFix(), 1500);
-        logger.info("Started v0.6. HDR=never, Video Hook=true, Graphics Capture=false, Graphics API=0.");
+        logger.info("Started v0.6.1. HDR=never, Video Hook=true, Graphics Capture=false, Graphics API=0.");
     },
 
     stop(): void {

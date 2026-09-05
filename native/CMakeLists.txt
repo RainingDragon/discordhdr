@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(DiscordHDRFixNative LANGUAGES CXX)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "DiscordHDRFix native probe is Windows-only.")
+    message(FATAL_ERROR "DiscordHDRFix native patch is Windows-only.")
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

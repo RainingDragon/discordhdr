@@ -26,13 +26,16 @@ Copy-Item -Force $Injector (Join-Path $Install "DiscordHDRFix.Injector.exe")
 Copy-Item -Force $Dll (Join-Path $Install "DiscordHDRFix.Native.dll")
 
 Write-Host ""
-Write-Host "DiscordHDRFix native probe installed to:"
+Write-Host "DiscordHDRFix v0.6.1 native files installed to:"
 Write-Host "  $Install"
 Write-Host ""
-Write-Host "Files:"
 Get-ChildItem $Install | Where-Object {
     $_.Name -in @("DiscordHDRFix.Injector.exe", "DiscordHDRFix.Native.dll")
 } | Format-Table Name, Length, LastWriteTime
+
 Write-Host ""
-Write-Host "Now copy vencord\DiscordHDRFix into Vencord\src\userplugins\DiscordHDRFix"
-Write-Host "and run pnpm build / pnpm inject as usual."
+Write-Host "Next:"
+Write-Host "  1. Replace Vencord\\src\\userplugins\\DiscordHDRFix with vencord\\DiscordHDRFix"
+Write-Host "  2. Run pnpm build"
+Write-Host "  3. Run pnpm inject"
+Write-Host "  4. Fully restart Discord"

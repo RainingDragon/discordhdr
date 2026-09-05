@@ -1,46 +1,15 @@
-# DiscordHDRFix v0.5 — GitHub cloud build
+# DiscordHDRFix v0.6.1
 
-This repository is configured so **GitHub Actions compiles the Windows native
-probe for you**. You do not need Visual Studio, CMake, MSVC, or Windows Build
-Tools installed locally.
+This build corrects the native HDR metadata layout used by the v0.6
+Video Hook experiment.
 
-## Fastest way to build
+The luminance settings remain runtime-editable through Vencord:
 
-1. Create a new GitHub repository.
-2. Put the contents of this folder at the repository root.
-3. Commit/push the files to `main`.
-4. Open the repository's **Actions** tab.
-5. Open **Build DiscordHDRFix Windows x64**.
-6. If a run did not start automatically, click **Run workflow**.
-7. When it finishes, open the run and download the artifact:
+- SDR white level
+- Input maximum luminance
 
-```text
-DiscordHDRFix-v0.5-windows-x64
-```
+The new native metadata state is fixed to the value (`1`) used by Discord's
+own valid HDR metadata builder.
 
-The artifact contains the compiled:
-
-```text
-DiscordHDRFix.Injector.exe
-DiscordHDRFix.Native.dll
-```
-
-plus the matching Vencord plugin and an install script.
-
-## Why this build is still a probe
-
-v0.4 established that forcing Discord to D3D11 Video Hook avoids the blown-out
-Graphics Capture output, but Video Hook is dull/gray and reports zero HDR frames.
-
-v0.5 validates the native GPU frame seam immediately before Discord's hardware
-encoder. It hooks `cc_encoder_add_frame_native(...)` in pass-through mode and
-counts frames. It does **not** alter the frame yet.
-
-If the status reports:
-
-```text
-hook_installed = true
-frames_seen = increasing
-```
-
-then the next build can insert the D3D11 HDR→SDR tone-map pass at that seam.
+This target is intentionally locked to the analyzed discord_voice.node build.
+If Discord updates the binary/signatures, the native patch refuses to install.

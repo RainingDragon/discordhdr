@@ -1,56 +1,57 @@
-# DiscordHDRFix v0.5 Windows x64 artifact
+# DiscordHDRFix v0.6.1 Windows x64
 
-This artifact was compiled by GitHub Actions on a Windows Server 2022 runner using
-the Visual Studio 2022 x64 toolchain.
+v0.6.1 corrects the HDR metadata object passed to Discord's own D3D11 renderer.
 
-## Contents
+## What changed from v0.6
+
+The exact Windows discord_voice.node build reads three metadata fields:
 
 ```text
-native/
-  DiscordHDRFix.Injector.exe
-  DiscordHDRFix.Native.dll
-
-vencord/
-  DiscordHDRFix/
-    index.ts
-    native.ts
-
-install-native.ps1
-SHA256SUMS.txt
++0x00  float
++0x04  float
++0x08  byte state
 ```
 
-## Install the native probe
+Discord's own valid-HDR builder writes `state = 1`.
 
-From PowerShell inside this artifact folder:
+v0.6.1 supplies the complete 12-byte object:
+
+```cpp
+struct HdrMetadata {
+    float sdrWhiteLevel;
+    float inputMaxLuminance;
+    uint8_t state;       // always 1 for injected valid HDR metadata
+    uint8_t padding[3];
+};
+```
+
+The two luminance settings remain live-editable from the Vencord plugin.
+No rebuild or restream is required when changing them.
+
+## Install
+
+Fully exit Discord.
+
+From PowerShell in this artifact folder:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\install-native.ps1
 ```
 
-That only copies the two precompiled native files to:
-
-```text
-%LOCALAPPDATA%\DiscordHDRFix\
-```
-
-No compiler, CMake, Visual Studio, or Build Tools are needed on your PC.
-
-## Install/update the Vencord plugin
-
-Copy:
-
-```text
-vencord\DiscordHDRFix
-```
-
-to:
+Replace:
 
 ```text
 Vencord\src\userplugins\DiscordHDRFix
 ```
 
-Then use your normal Vencord commands:
+with:
+
+```text
+vencord\DiscordHDRFix
+```
+
+Then from the Vencord root:
 
 ```powershell
 pnpm build
@@ -59,41 +60,34 @@ pnpm inject
 
 Fully restart Discord.
 
-## v0.5 test settings
+## Test
 
-Keep:
-
-```text
-HDR mode: Force SDR / never
-```
-
-The plugin also forces:
+Use the values that looked best in v0.6 first. If those were:
 
 ```text
-useVideoHook = true
-useGraphicsCapture = false
-useGraphicsCaptureApiLevel = 0
+SDR white: 600
+Input max: 460
 ```
 
-Start Go Live, let it run for several seconds, then use:
+start v0.6.1 with those same values so the only A/B variable is the metadata
+state/layout fix.
+
+Start Go Live and open:
 
 ```text
 Vencord Toolbox
-→ Show Native Frame Probe Status
+→ Show Native HDR Fix Status
 ```
 
-The target result is:
+Look for:
 
 ```json
 {
+  "version": "0.6.1",
   "hook_installed": true,
-  "frames_seen": 600,
-  "mode": "pass-through",
+  "metadata_state": 1,
+  "metadata_size": 12,
+  "hdr_metadata_injected": 1000,
   "error": ""
 }
 ```
-
-`frames_seen` should continue increasing.
-
-v0.5 intentionally does not modify colors yet. It verifies the Windows native
-pre-encode hook before the HDR→SDR shader is added.
