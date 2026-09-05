@@ -23,6 +23,18 @@ function configPath(): string {
     return join(installDir(), "tone-map.cfg");
 }
 
+function sourceModeNumber(mode: string): number {
+    switch (mode) {
+        case "autoHdr": return 1;
+        case "rec709Linear": return 2;
+        case "rec709Srgb": return 3;
+        case "rec2020Linear": return 4;
+        case "rec2020Srgb": return 5;
+        case "rec2020St2084": return 6;
+        default: return 0;
+    }
+}
+
 async function checkNativeFiles() {
     try {
         await access(injectorPath(), constants.X_OK);
@@ -41,17 +53,20 @@ export async function writeToneMapConfig(
     _event: Electron.IpcMainInvokeEvent,
     enabled: boolean,
     sdrWhiteLevel: number,
-    inputMaxLuminance: number
+    inputMaxLuminance: number,
+    sourceColorMode: string
 ) {
     await mkdir(installDir(), { recursive: true });
 
     const white = Math.min(1000, Math.max(40, Number(sdrWhiteLevel) || 200));
     const peak = Math.min(10000, Math.max(100, Number(inputMaxLuminance) || 1000));
+    const sourceMode = sourceModeNumber(sourceColorMode);
 
     const text = [
         `enabled=${enabled ? 1 : 0}`,
         `sdr_white=${white}`,
         `input_max=${peak}`,
+        `source_mode=${sourceMode}`,
         ""
     ].join("\n");
 
@@ -60,7 +75,15 @@ export async function writeToneMapConfig(
     await writeFile(tempPath, text, "utf8");
     await rename(tempPath, finalPath);
 
-    return { ok: true, path: finalPath, enabled, sdrWhiteLevel: white, inputMaxLuminance: peak };
+    return {
+        ok: true,
+        path: finalPath,
+        enabled,
+        sdrWhiteLevel: white,
+        inputMaxLuminance: peak,
+        sourceColorMode,
+        sourceMode
+    };
 }
 
 export async function startNativeFix(_event: Electron.IpcMainInvokeEvent) {
@@ -85,7 +108,7 @@ export async function startNativeFix(_event: Electron.IpcMainInvokeEvent) {
 export async function readNativeStatus(_event: Electron.IpcMainInvokeEvent) {
     const dir = tmpdir();
     const names = (await readdir(dir))
-        .filter(name => /^DiscordHDRFix-v06-\d+\.json$/i.test(name));
+        .filter(name => /^DiscordHDRFix-v07-\d+\.json$/i.test(name));
 
     if (names.length === 0)
         return null;

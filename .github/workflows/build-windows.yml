@@ -46,7 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $root = "package\DiscordHDRFix-v0.6.1"
+          $root = "package\DiscordHDRFix-v0.7"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -64,6 +64,7 @@ jobs:
             Get-FileHash (Join-Path $native "DiscordHDRFix.Injector.exe") -Algorithm SHA256
             Get-FileHash (Join-Path $native "DiscordHDRFix.Native.dll") -Algorithm SHA256
           )
+
           $hashes |
             ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
             Set-Content -Encoding ascii (Join-Path $root "SHA256SUMS.txt")
@@ -71,7 +72,7 @@ jobs:
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v0.6.1-windows-x64
-          path: package/DiscordHDRFix-v0.6.1
+          name: DiscordHDRFix-v0.7-windows-x64
+          path: package/DiscordHDRFix-v0.7
           if-no-files-found: error
           retention-days: 14

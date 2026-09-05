@@ -2,10 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
-#include <cwchar>
 #include <cstring>
 #include <limits>
 
@@ -22,48 +21,83 @@ constexpr std::uintptr_t kVideoHookRendererCallRva = 0x003fd462;
 constexpr std::uintptr_t kVideoHookReturnRva = 0x003fd467;
 constexpr std::uintptr_t kRendererWrapperRva = 0x0052cad0;
 
-// Discord's own valid HDR metadata builder writes:
-//   float +0x00
-//   float +0x04
-//   byte  +0x08 = 1
-//
-// The renderer reads all three:
-//   RVA 0x52d02b -> float +0x00
-//   RVA 0x52d246 -> float +0x04
-//   RVA 0x52d2c2 -> byte  +0x08
-//
-// v0.6 only guaranteed the first 8 bytes. v0.6.1 supplies the complete
-// structure and explicitly uses Discord's own "valid HDR metadata" state.
+// Renderer source descriptor fields recovered from the exact binary:
+// +0x178 = DXGI_FORMAT (u32)
+// +0x17c = source gamut / primaries enum
+//          0 = Rec709, 1 = Rec2020, 2 = Arc
+// +0x17d = transfer enum
+//          0 = Linear, 1 = sRGB, 2 = SMPTE ST 2084 / PQ
+constexpr std::size_t kSourceFormatOffset = 0x178;
+constexpr std::size_t kSourcePrimariesOffset = 0x17c;
+constexpr std::size_t kSourceTransferOffset = 0x17d;
+
+constexpr std::uint8_t kRec709 = 0;
+constexpr std::uint8_t kRec2020 = 1;
+constexpr std::uint8_t kArc = 2;
+
+constexpr std::uint8_t kLinear = 0;
+constexpr std::uint8_t kSrgb = 1;
+constexpr std::uint8_t kSt2084 = 2;
+
+// DXGI formats relevant to the renderer's own HDR branches.
+constexpr std::uint32_t kDxgiR16G16B16A16Float = 10;
+constexpr std::uint32_t kDxgiR10G10B10A2Unorm = 24;
+
 struct HdrMetadata {
     float sdrWhiteLevel;       // +0x00
     float inputMaxLuminance;   // +0x04
     std::uint8_t state;        // +0x08; 1 = valid HDR metadata
-    std::uint8_t padding[3];   // +0x09..+0x0b
+    std::uint8_t padding[3];
 };
 
 static_assert(sizeof(HdrMetadata) == 12);
 static_assert(offsetof(HdrMetadata, state) == 8);
 
-constexpr std::uint8_t kValidHdrMetadataState = 1;
-constexpr float kDefaultSdrWhite = 200.0f;
-constexpr float kDefaultInputMax = 1000.0f;
+enum class SourceColorMode : std::uint32_t {
+    Preserve = 0,
+    AutoHdrByFormat = 1,
+    Rec709Linear = 2,
+    Rec709Srgb = 3,
+    Rec2020Linear = 4,
+    Rec2020Srgb = 5,
+    Rec2020St2084 = 6
+};
 
-// Ring avoids mutating metadata currently being consumed by Discord's render
-// thread. Configuration changes are human-speed, so 256 immutable snapshots
-// provide a very large safety margin before a slot can ever be reused.
+struct Config {
+    bool enabled = true;
+    float white = 200.0f;
+    float peak = 1000.0f;
+    SourceColorMode sourceColorMode = SourceColorMode::Preserve;
+};
+
+using RendererFn = void* (__fastcall*)(
+    void*, void*, void*, void*,
+    void*, void*, void*, void*, void*
+);
+
+RendererFn g_originalRenderer = nullptr;
+
 alignas(16) HdrMetadata g_metadataRing[256]{};
 std::atomic<unsigned> g_metadataWriteIndex{0};
-
 void* volatile g_activeMetadataPtr = nullptr;
 
 std::atomic<bool> g_enabled{true};
 std::atomic<std::uint32_t> g_whiteBits{0};
 std::atomic<std::uint32_t> g_peakBits{0};
+std::atomic<std::uint32_t> g_sourceMode{0};
 std::atomic<bool> g_hookInstalled{false};
 
+std::atomic<std::uint32_t> g_lastOriginalFormat{0xffffffffu};
+std::atomic<std::uint32_t> g_lastOriginalPrimaries{0xffffffffu};
+std::atomic<std::uint32_t> g_lastOriginalTransfer{0xffffffffu};
+std::atomic<std::uint32_t> g_lastEffectivePrimaries{0xffffffffu};
+std::atomic<std::uint32_t> g_lastEffectiveTransfer{0xffffffffu};
+
+std::atomic<unsigned long long> g_rendererCalls{0};
+std::atomic<unsigned long long> g_metadataInjectedCalls{0};
+std::atomic<unsigned long long> g_sourceOverrideCalls{0};
+
 std::uint8_t* g_relay = nullptr;
-volatile LONG64* g_rendererCalls = nullptr;
-volatile LONG64* g_injectedCalls = nullptr;
 
 wchar_t g_statusPath[MAX_PATH]{};
 wchar_t g_configPath[MAX_PATH]{};
@@ -90,17 +124,57 @@ void SetError(const char* text) {
     strncpy_s(g_error, text ? text : "", _TRUNCATE);
 }
 
+const char* FormatName(std::uint32_t format) {
+    switch (format) {
+    case 10: return "R16G16B16A16_FLOAT";
+    case 24: return "R10G10B10A2_UNORM";
+    case 29: return "R8G8B8A8_UNORM_SRGB";
+    case 91: return "B8G8R8A8_UNORM_SRGB";
+    case 93: return "B8G8R8X8_UNORM_SRGB";
+    default: return "other";
+    }
+}
+
+const char* PrimariesName(std::uint32_t value) {
+    switch (value) {
+    case 0: return "Rec709";
+    case 1: return "Rec2020";
+    case 2: return "Arc";
+    default: return "unknown";
+    }
+}
+
+const char* TransferName(std::uint32_t value) {
+    switch (value) {
+    case 0: return "Linear";
+    case 1: return "sRGB";
+    case 2: return "SMPTE_ST2084";
+    default: return "unknown";
+    }
+}
+
+const char* SourceModeName(std::uint32_t value) {
+    switch (static_cast<SourceColorMode>(value)) {
+    case SourceColorMode::Preserve: return "preserve";
+    case SourceColorMode::AutoHdrByFormat: return "auto_hdr_by_dxgi_format";
+    case SourceColorMode::Rec709Linear: return "rec709_linear";
+    case SourceColorMode::Rec709Srgb: return "rec709_srgb";
+    case SourceColorMode::Rec2020Linear: return "rec2020_linear";
+    case SourceColorMode::Rec2020Srgb: return "rec2020_srgb";
+    case SourceColorMode::Rec2020St2084: return "rec2020_st2084";
+    default: return "preserve";
+    }
+}
+
 void BuildPaths() {
     wchar_t temp[MAX_PATH]{};
     DWORD tempLen = GetTempPathW(MAX_PATH, temp);
     if (tempLen == 0 || tempLen >= MAX_PATH)
         wcscpy_s(temp, L".\\");
 
-    // Keep the v06 prefix so the existing Vencord native helper continues to
-    // discover the status file without changing its IPC contract.
     swprintf_s(
         g_statusPath,
-        L"%sDiscordHDRFix-v06-%lu.json",
+        L"%sDiscordHDRFix-v07-%lu.json",
         temp,
         GetCurrentProcessId()
     );
@@ -124,23 +198,23 @@ void BuildPaths() {
     );
 }
 
-struct Config {
-    bool enabled = true;
-    float white = kDefaultSdrWhite;
-    float peak = kDefaultInputMax;
-};
-
 Config CurrentConfig() {
     Config c;
     c.enabled = g_enabled.load(std::memory_order_relaxed);
 
     c.white = BitsFloat(g_whiteBits.load(std::memory_order_relaxed));
     if (!(c.white > 0.0f))
-        c.white = kDefaultSdrWhite;
+        c.white = 200.0f;
 
     c.peak = BitsFloat(g_peakBits.load(std::memory_order_relaxed));
     if (!(c.peak > 0.0f))
-        c.peak = kDefaultInputMax;
+        c.peak = 1000.0f;
+
+    const auto mode = g_sourceMode.load(std::memory_order_relaxed);
+    c.sourceColorMode =
+        mode <= static_cast<std::uint32_t>(SourceColorMode::Rec2020St2084)
+            ? static_cast<SourceColorMode>(mode)
+            : SourceColorMode::Preserve;
 
     return c;
 }
@@ -155,6 +229,7 @@ Config ReadConfig() {
     char line[256]{};
     while (fgets(line, static_cast<int>(sizeof(line)), f)) {
         int enabled = 0;
+        unsigned sourceMode = 0;
         float value = 0.0f;
 
         if (sscanf_s(line, "enabled=%d", &enabled) == 1) {
@@ -171,14 +246,19 @@ Config ReadConfig() {
             c.peak = value;
             continue;
         }
+
+        if (sscanf_s(line, "source_mode=%u", &sourceMode) == 1) {
+            if (sourceMode <=
+                static_cast<unsigned>(SourceColorMode::Rec2020St2084)) {
+                c.sourceColorMode =
+                    static_cast<SourceColorMode>(sourceMode);
+            }
+            continue;
+        }
     }
 
     fclose(f);
 
-    // Match the plugin's independent ranges. In particular, do NOT force
-    // input_max >= sdr_white: the tester is intentionally evaluating values
-    // such as 600 / 460 and Discord's native structure itself does not encode
-    // that constraint.
     c.white = std::clamp(c.white, 40.0f, 1000.0f);
     c.peak = std::clamp(c.peak, 100.0f, 10000.0f);
 
@@ -187,13 +267,12 @@ Config ReadConfig() {
 
 void PublishConfig(const Config& c) {
     const unsigned index =
-        g_metadataWriteIndex.fetch_add(1, std::memory_order_relaxed)
-        % 256u;
+        g_metadataWriteIndex.fetch_add(1, std::memory_order_relaxed) % 256u;
 
     HdrMetadata& m = g_metadataRing[index];
     m.sdrWhiteLevel = c.white;
     m.inputMaxLuminance = c.peak;
-    m.state = kValidHdrMetadataState;
+    m.state = 1;
     m.padding[0] = 0;
     m.padding[1] = 0;
     m.padding[2] = 0;
@@ -208,6 +287,159 @@ void PublishConfig(const Config& c) {
     g_enabled.store(c.enabled, std::memory_order_relaxed);
     g_whiteBits.store(FloatBits(c.white), std::memory_order_relaxed);
     g_peakBits.store(FloatBits(c.peak), std::memory_order_relaxed);
+    g_sourceMode.store(
+        static_cast<std::uint32_t>(c.sourceColorMode),
+        std::memory_order_relaxed
+    );
+}
+
+void ChooseEffectiveColor(
+    SourceColorMode mode,
+    std::uint32_t format,
+    std::uint8_t originalPrimaries,
+    std::uint8_t originalTransfer,
+    std::uint8_t& effectivePrimaries,
+    std::uint8_t& effectiveTransfer
+) {
+    effectivePrimaries = originalPrimaries;
+    effectiveTransfer = originalTransfer;
+
+    switch (mode) {
+    case SourceColorMode::Preserve:
+        return;
+
+    case SourceColorMode::AutoHdrByFormat:
+        if (format == kDxgiR16G16B16A16Float) {
+            effectivePrimaries = kRec709;
+            effectiveTransfer = kLinear;
+        } else if (format == kDxgiR10G10B10A2Unorm) {
+            effectivePrimaries = kRec2020;
+            effectiveTransfer = kSt2084;
+        }
+        return;
+
+    case SourceColorMode::Rec709Linear:
+        effectivePrimaries = kRec709;
+        effectiveTransfer = kLinear;
+        return;
+
+    case SourceColorMode::Rec709Srgb:
+        effectivePrimaries = kRec709;
+        effectiveTransfer = kSrgb;
+        return;
+
+    case SourceColorMode::Rec2020Linear:
+        effectivePrimaries = kRec2020;
+        effectiveTransfer = kLinear;
+        return;
+
+    case SourceColorMode::Rec2020Srgb:
+        effectivePrimaries = kRec2020;
+        effectiveTransfer = kSrgb;
+        return;
+
+    case SourceColorMode::Rec2020St2084:
+        effectivePrimaries = kRec2020;
+        effectiveTransfer = kSt2084;
+        return;
+    }
+}
+
+extern "C" __declspec(noinline) void* __fastcall HookRenderer(
+    void* a1,
+    void* a2,
+    void* a3,
+    void* a4,
+    void* a5,
+    void* a6,
+    void* a7,
+    void* a8,
+    void* a9
+) {
+    g_rendererCalls.fetch_add(1, std::memory_order_relaxed);
+
+    if (a4) {
+        auto* source = static_cast<std::uint8_t*>(a4);
+
+        const std::uint32_t format =
+            *reinterpret_cast<std::uint32_t*>(
+                source + kSourceFormatOffset
+            );
+
+        const std::uint8_t originalPrimaries =
+            *(source + kSourcePrimariesOffset);
+
+        const std::uint8_t originalTransfer =
+            *(source + kSourceTransferOffset);
+
+        g_lastOriginalFormat.store(format, std::memory_order_relaxed);
+        g_lastOriginalPrimaries.store(
+            originalPrimaries,
+            std::memory_order_relaxed
+        );
+        g_lastOriginalTransfer.store(
+            originalTransfer,
+            std::memory_order_relaxed
+        );
+
+        std::uint8_t effectivePrimaries = originalPrimaries;
+        std::uint8_t effectiveTransfer = originalTransfer;
+
+        const auto mode = static_cast<SourceColorMode>(
+            g_sourceMode.load(std::memory_order_relaxed)
+        );
+
+        ChooseEffectiveColor(
+            mode,
+            format,
+            originalPrimaries,
+            originalTransfer,
+            effectivePrimaries,
+            effectiveTransfer
+        );
+
+        if (effectivePrimaries != originalPrimaries ||
+            effectiveTransfer != originalTransfer) {
+            *(source + kSourcePrimariesOffset) = effectivePrimaries;
+            *(source + kSourceTransferOffset) = effectiveTransfer;
+
+            g_sourceOverrideCalls.fetch_add(
+                1,
+                std::memory_order_relaxed
+            );
+        }
+
+        g_lastEffectivePrimaries.store(
+            effectivePrimaries,
+            std::memory_order_relaxed
+        );
+        g_lastEffectiveTransfer.store(
+            effectiveTransfer,
+            std::memory_order_relaxed
+        );
+    }
+
+    void* metadata = a9;
+
+    if (g_enabled.load(std::memory_order_relaxed)) {
+        metadata = InterlockedCompareExchangePointer(
+            reinterpret_cast<PVOID volatile*>(&g_activeMetadataPtr),
+            nullptr,
+            nullptr
+        );
+
+        if (metadata) {
+            g_metadataInjectedCalls.fetch_add(
+                1,
+                std::memory_order_relaxed
+            );
+        }
+    }
+
+    return g_originalRenderer(
+        a1, a2, a3, a4,
+        a5, a6, a7, a8, metadata
+    );
 }
 
 bool EqualBytes(
@@ -289,7 +521,6 @@ bool VerifyDiscordBuild(HMODULE voice) {
         return false;
     }
 
-    // Verify rel32 resolves to the wrapper we analyzed.
     const auto* call = base + kVideoHookRendererCallRva;
     std::int32_t displacement = 0;
     std::memcpy(&displacement, call + 1, sizeof(displacement));
@@ -392,13 +623,8 @@ void WriteImmediate(std::uint8_t* dest, T value) {
     std::memcpy(dest, &value, sizeof(value));
 }
 
-bool BuildRelay(
-    std::uint8_t* callSite,
-    std::uint8_t* rendererWrapper
-) {
+bool BuildRelay(std::uint8_t* callSite) {
     constexpr SIZE_T allocationSize = 0x1000;
-    constexpr SIZE_T rendererCounterOffset = 0x100;
-    constexpr SIZE_T injectedCounterOffset = 0x108;
 
     g_relay = static_cast<std::uint8_t*>(
         AllocateNear(callSite, allocationSize)
@@ -411,125 +637,15 @@ bool BuildRelay(
 
     std::memset(g_relay, 0xcc, allocationSize);
 
-    g_rendererCalls =
-        reinterpret_cast<volatile LONG64*>(
-            g_relay + rendererCounterOffset
-        );
-
-    g_injectedCalls =
-        reinterpret_cast<volatile LONG64*>(
-            g_relay + injectedCounterOffset
-        );
-
-    *g_rendererCalls = 0;
-    *g_injectedCalls = 0;
-
     std::size_t p = 0;
 
-    auto emitRipLockInc = [&](SIZE_T counterOffset) -> bool {
-        // lock inc qword ptr [rip + disp32]
-        g_relay[p++] = 0xf0;
-        g_relay[p++] = 0x48;
-        g_relay[p++] = 0xff;
-        g_relay[p++] = 0x05;
-
-        const std::size_t dispOffset = p;
-        p += sizeof(std::int32_t);
-
-        const std::intptr_t target =
-            reinterpret_cast<std::intptr_t>(
-                g_relay + counterOffset
-            );
-
-        const std::intptr_t after =
-            reinterpret_cast<std::intptr_t>(
-                g_relay + dispOffset + sizeof(std::int32_t)
-            );
-
-        const std::intptr_t delta = target - after;
-        if (delta < std::numeric_limits<std::int32_t>::min() ||
-            delta > std::numeric_limits<std::int32_t>::max()) {
-            return false;
-        }
-
-        WriteImmediate(
-            g_relay + dispOffset,
-            static_cast<std::int32_t>(delta)
-        );
-
-        return true;
-    };
-
-    if (!emitRipLockInc(rendererCounterOffset)) {
-        SetError("internal renderer counter displacement overflow");
-        return false;
-    }
-
-    // mov rax, &g_activeMetadataPtr
+    // mov rax, HookRenderer
     g_relay[p++] = 0x48;
     g_relay[p++] = 0xb8;
+
     WriteImmediate(
         g_relay + p,
-        reinterpret_cast<std::uintptr_t>(&g_activeMetadataPtr)
-    );
-    p += sizeof(std::uintptr_t);
-
-    // mov rax, [rax]
-    g_relay[p++] = 0x48;
-    g_relay[p++] = 0x8b;
-    g_relay[p++] = 0x00;
-
-    // test rax, rax
-    g_relay[p++] = 0x48;
-    g_relay[p++] = 0x85;
-    g_relay[p++] = 0xc0;
-
-    // je skipInjection
-    const std::size_t jeOpcode = p;
-    g_relay[p++] = 0x74;
-    const std::size_t jeDisp = p;
-    g_relay[p++] = 0x00;
-
-    // At the relay entry the original CALL has already pushed its return
-    // address. Discord's ninth argument was [caller_rsp + 0x40], therefore it
-    // is [relay_rsp + 0x48].
-    //
-    // mov [rsp + 0x48], rax
-    g_relay[p++] = 0x48;
-    g_relay[p++] = 0x89;
-    g_relay[p++] = 0x44;
-    g_relay[p++] = 0x24;
-    g_relay[p++] = 0x48;
-
-    if (!emitRipLockInc(injectedCounterOffset)) {
-        SetError("internal injected counter displacement overflow");
-        return false;
-    }
-
-    const std::size_t skipInjection = p;
-
-    const std::ptrdiff_t shortJump =
-        static_cast<std::ptrdiff_t>(skipInjection) -
-        static_cast<std::ptrdiff_t>(jeDisp + 1);
-
-    if (shortJump < -128 || shortJump > 127) {
-        SetError("internal relay short jump overflow");
-        return false;
-    }
-
-    g_relay[jeDisp] =
-        static_cast<std::uint8_t>(
-            static_cast<std::int8_t>(shortJump)
-        );
-
-    (void)jeOpcode;
-
-    // mov rax, rendererWrapper
-    g_relay[p++] = 0x48;
-    g_relay[p++] = 0xb8;
-    WriteImmediate(
-        g_relay + p,
-        reinterpret_cast<std::uintptr_t>(rendererWrapper)
+        reinterpret_cast<std::uintptr_t>(&HookRenderer)
     );
     p += sizeof(std::uintptr_t);
 
@@ -549,9 +665,12 @@ bool BuildRelay(
 bool PatchVideoHookCall(HMODULE voice) {
     auto* base = reinterpret_cast<std::uint8_t*>(voice);
     auto* callSite = base + kVideoHookRendererCallRva;
-    auto* wrapper = base + kRendererWrapperRva;
 
-    if (!BuildRelay(callSite, wrapper))
+    g_originalRenderer = reinterpret_cast<RendererFn>(
+        base + kRendererWrapperRva
+    );
+
+    if (!BuildRelay(callSite))
         return false;
 
     const std::intptr_t from =
@@ -567,6 +686,7 @@ bool PatchVideoHookCall(HMODULE voice) {
     }
 
     std::uint8_t patch[5] = { 0xe8, 0, 0, 0, 0 };
+
     WriteImmediate(
         patch + 1,
         static_cast<std::int32_t>(delta)
@@ -601,36 +721,36 @@ bool PatchVideoHookCall(HMODULE voice) {
     return true;
 }
 
-unsigned long long ReadCounter(volatile LONG64* counter) {
-    if (!counter)
-        return 0;
-
-    return static_cast<unsigned long long>(
-        InterlockedCompareExchange64(counter, 0, 0)
-    );
-}
-
 void WriteStatus() {
     const float white =
         BitsFloat(g_whiteBits.load(std::memory_order_relaxed));
     const float peak =
         BitsFloat(g_peakBits.load(std::memory_order_relaxed));
 
-    const unsigned long long rendererCalls =
-        ReadCounter(g_rendererCalls);
-    const unsigned long long injectedCalls =
-        ReadCounter(g_injectedCalls);
+    const auto sourceMode =
+        g_sourceMode.load(std::memory_order_relaxed);
 
-    char json[4096]{};
+    const auto format =
+        g_lastOriginalFormat.load(std::memory_order_relaxed);
+    const auto originalPrimaries =
+        g_lastOriginalPrimaries.load(std::memory_order_relaxed);
+    const auto originalTransfer =
+        g_lastOriginalTransfer.load(std::memory_order_relaxed);
+    const auto effectivePrimaries =
+        g_lastEffectivePrimaries.load(std::memory_order_relaxed);
+    const auto effectiveTransfer =
+        g_lastEffectiveTransfer.load(std::memory_order_relaxed);
+
+    char json[6144]{};
 
     _snprintf_s(
         json,
         sizeof(json),
         _TRUNCATE,
         "{\n"
-        "  \"version\": \"0.6.1\",\n"
+        "  \"version\": \"0.7\",\n"
         "  \"pid\": %lu,\n"
-        "  \"mode\": \"discord-native-hdr-metadata-injection\",\n"
+        "  \"mode\": \"hdr-metadata-plus-source-colorspace\",\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"
         "  \"renderer_wrapper_rva\": \"0x52cad0\",\n"
@@ -640,9 +760,20 @@ void WriteStatus() {
         "  \"input_max_luminance\": %.3f,\n"
         "  \"metadata_state\": 1,\n"
         "  \"metadata_size\": 12,\n"
+        "  \"source_color_mode\": \"%s\",\n"
+        "  \"source_format\": %u,\n"
+        "  \"source_format_name\": \"%s\",\n"
+        "  \"original_primaries\": %u,\n"
+        "  \"original_primaries_name\": \"%s\",\n"
+        "  \"original_transfer\": %u,\n"
+        "  \"original_transfer_name\": \"%s\",\n"
+        "  \"effective_primaries\": %u,\n"
+        "  \"effective_primaries_name\": \"%s\",\n"
+        "  \"effective_transfer\": %u,\n"
+        "  \"effective_transfer_name\": \"%s\",\n"
         "  \"renderer_calls\": %llu,\n"
-        "  \"video_hook_calls\": %llu,\n"
         "  \"hdr_metadata_injected\": %llu,\n"
+        "  \"source_color_overrides\": %llu,\n"
         "  \"last_original_hdr_metadata_null\": true,\n"
         "  \"error\": \"%s\"\n"
         "}\n",
@@ -652,9 +783,20 @@ void WriteStatus() {
         g_enabled.load(std::memory_order_relaxed) ? "true" : "false",
         static_cast<double>(white),
         static_cast<double>(peak),
-        rendererCalls,
-        rendererCalls,
-        injectedCalls,
+        SourceModeName(sourceMode),
+        format,
+        FormatName(format),
+        originalPrimaries,
+        PrimariesName(originalPrimaries),
+        originalTransfer,
+        TransferName(originalTransfer),
+        effectivePrimaries,
+        PrimariesName(effectivePrimaries),
+        effectiveTransfer,
+        TransferName(effectiveTransfer),
+        g_rendererCalls.load(std::memory_order_relaxed),
+        g_metadataInjectedCalls.load(std::memory_order_relaxed),
+        g_sourceOverrideCalls.load(std::memory_order_relaxed),
         g_error
     );
 
@@ -697,18 +839,19 @@ bool ConfigChanged(const Config& a, const Config& b) {
     return
         a.enabled != b.enabled ||
         a.white != b.white ||
-        a.peak != b.peak;
+        a.peak != b.peak ||
+        a.sourceColorMode != b.sourceColorMode;
 }
 
 DWORD WINAPI WorkerThread(void*) {
     BuildPaths();
 
     g_whiteBits.store(
-        FloatBits(kDefaultSdrWhite),
+        FloatBits(200.0f),
         std::memory_order_relaxed
     );
     g_peakBits.store(
-        FloatBits(kDefaultInputMax),
+        FloatBits(1000.0f),
         std::memory_order_relaxed
     );
 

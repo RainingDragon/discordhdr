@@ -1,37 +1,49 @@
-# DiscordHDRFix v0.6.1 engineering notes
+# v0.7 engineering notes
 
 Target discord_voice.node SHA-256:
 
 54d452eefb5bd20f022dca1f93e3a92cf641e14283761720e4276f3fb0585db9
 
-Relevant RVAs:
+Renderer callsite:
 
-- Video Hook sets ninth renderer argument to null: 0x003fd443
-- Video Hook CALL to shared renderer wrapper: 0x003fd462
-- Return after that CALL: 0x003fd467
-- Shared renderer wrapper: 0x0052cad0
+- Video Hook renderer CALL: 0x003fd462
+- Shared renderer wrapper:  0x0052cad0
 
-Exact metadata consumption in the renderer:
+At the wrapper entry, the fourth argument (`r9`) becomes the renderer's source
+descriptor. The renderer reads:
 
-- 0x0052d02b: reads float at metadata + 0x00
-- 0x0052d246: reads float at metadata + 0x04
-- 0x0052d2c2: reads byte  at metadata + 0x08
+```text
+descriptor + 0x178 : DXGI_FORMAT u32
+descriptor + 0x17c : gamut / primaries enum
+descriptor + 0x17d : transfer-function enum
+```
 
-Discord's own builder at 0x005c3440:
+The enum strings and renderer branches establish:
 
-- 0x005c34d5: writes float +0x00
-- 0x005c34d9: writes float +0x04
-- 0x005c34de: sets CL = 1
-- 0x005c34e0: writes CL to byte +0x08
+```text
+primaries 0 = Rec709
+primaries 1 = Rec2020
+primaries 2 = Arc
 
-Its failure/fallback route initializes state to 2.
+transfer 0 = Linear
+transfer 1 = sRGB
+transfer 2 = SMPTE ST 2084 / PQ
+```
 
-Therefore v0.6.1 explicitly supplies state=1 and 3 bytes of zero padding.
+The renderer also explicitly branches on DXGI formats 10 and 24 for HDR paths:
 
-Patch strategy remains minimal:
+```text
+10 = DXGI_FORMAT_R16G16B16A16_FLOAT
+24 = DXGI_FORMAT_R10G10B10A2_UNORM
+```
 
-1. Verify exact build and callsite signatures.
-2. Replace only the Video Hook renderer CALL with a nearby relay.
-3. Relay replaces only the ninth stack argument when enabled.
-4. Tail-jump into Discord's untouched shared renderer wrapper.
-5. Preserve Discord capture, audio, encoder, bitrate and Go Live pipeline.
+v0.7 replaces the original renderer CALL with a nearby relay that jumps to a
+typed x64 hook function. The hook:
+
+1. Records the source format/primaries/transfer.
+2. Optionally changes only the stack-local source descriptor's primaries and
+   transfer bytes.
+3. Supplies the 12-byte HDR metadata object if enabled.
+4. Calls Discord's original renderer wrapper with every other argument intact.
+
+No texture copies, CPU readback, extra encoder, mirror window or audio changes.
