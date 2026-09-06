@@ -1,51 +1,39 @@
-# DiscordHDRFix v1.0.0 compiled Windows artifact
+# DiscordHDRFix v1.0.1 Auto Test — compiled artifact
 
-This is the package intended to hand to another user.
+Do not hand this to another user as the final release yet. This build validates
+automatic HDR/SDR detection.
 
-## Quick install
+## Install
 
-Fully exit Discord, then run:
+Fully exit Discord, then:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\Install-DiscordHDRFix.ps1
 ```
 
-The installer:
+Replace/rebuild the Vencord plugin if the installer does not find your Vencord
+checkout automatically.
 
-1. Installs `DiscordHDRFix.Injector.exe` and `DiscordHDRFix.Native.dll` to
-   `%LOCALAPPDATA%\DiscordHDRFix`.
-2. Creates the tested defaults on a clean install:
-   - Auto HDR by DXGI format
-   - SDR white 460
-   - Input max 1000
-3. Copies the Vencord userplugin into `src\userplugins\DiscordHDRFix`.
-4. Runs `pnpm build`.
-5. Runs `pnpm inject`.
-
-If Vencord cannot be auto-detected:
-
-```powershell
-.\Install-DiscordHDRFix.ps1 -VencordPath "C:\path\to\Vencord"
-```
-
-## Uninstall
-
-Fully exit Discord:
-
-```powershell
-.\Uninstall-DiscordHDRFix.ps1
-```
-
-## Expected automatic mapping
+## Required settings
 
 ```text
-R10G10B10A2_UNORM  -> Rec.2020 + ST.2084 / PQ
-R16G16B16A16_FLOAT -> Rec.709 + Linear / scRGB
-other formats       -> preserve Discord metadata
+Correction enabled: ON
+Detection mode: Automatic
+SDR white: 460
+Input max: 1000
 ```
 
-## Important
+## Test both
 
-The native patch is version-locked to the analyzed `discord_voice.node` and fails closed
-on an unknown Discord build.
+1. Native HDR game.
+2. Slay the Spire 2 with Windows AutoHDR OFF.
+
+After each stream, use:
+
+```text
+Vencord Toolbox
+-> Show Native HDR Fix Status
+```
+
+Send the full status.

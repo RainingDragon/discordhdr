@@ -8,6 +8,7 @@ function installDir(): string {
     const localAppData = process.env.LOCALAPPDATA;
     if (!localAppData)
         throw new Error("LOCALAPPDATA is not available.");
+
     return join(localAppData, "DiscordHDRFix");
 }
 
@@ -23,14 +24,11 @@ function configPath(): string {
     return join(installDir(), "tone-map.cfg");
 }
 
-function sourceModeNumber(mode: string): number {
+function detectionModeNumber(mode: string): number {
     switch (mode) {
-        case "autoHdr": return 1;
-        case "rec709Linear": return 2;
-        case "rec709Srgb": return 3;
-        case "rec2020Linear": return 4;
-        case "rec2020Srgb": return 5;
-        case "rec2020St2084": return 6;
+        case "forceSdr": return 1;
+        case "forceHdr10": return 2;
+        case "forceScRgb": return 3;
         default: return 0;
     }
 }
@@ -39,9 +37,19 @@ async function checkNativeFiles() {
     try {
         await access(injectorPath(), constants.X_OK);
         await access(nativeDllPath(), constants.R_OK);
-        return { ok: true, injector: injectorPath(), dll: nativeDllPath() };
+
+        return {
+            ok: true,
+            injector: injectorPath(),
+            dll: nativeDllPath()
+        };
     } catch (error) {
-        return { ok: false, injector: injectorPath(), dll: nativeDllPath(), error: String(error) };
+        return {
+            ok: false,
+            injector: injectorPath(),
+            dll: nativeDllPath(),
+            error: String(error)
+        };
     }
 }
 
@@ -54,24 +62,33 @@ export async function writeToneMapConfig(
     enabled: boolean,
     sdrWhiteLevel: number,
     inputMaxLuminance: number,
-    sourceColorMode: string
+    detectionMode: string
 ) {
     await mkdir(installDir(), { recursive: true });
 
-    const white = Math.min(1000, Math.max(40, Number(sdrWhiteLevel) || 200));
-    const peak = Math.min(10000, Math.max(100, Number(inputMaxLuminance) || 1000));
-    const sourceMode = sourceModeNumber(sourceColorMode);
+    const white = Math.min(
+        1000,
+        Math.max(40, Number(sdrWhiteLevel) || 460)
+    );
+
+    const peak = Math.min(
+        10000,
+        Math.max(100, Number(inputMaxLuminance) || 1000)
+    );
+
+    const mode = detectionModeNumber(detectionMode);
 
     const text = [
         `enabled=${enabled ? 1 : 0}`,
         `sdr_white=${white}`,
         `input_max=${peak}`,
-        `source_mode=${sourceMode}`,
+        `detection_mode=${mode}`,
         ""
     ].join("\n");
 
     const finalPath = configPath();
     const tempPath = `${finalPath}.tmp`;
+
     await writeFile(tempPath, text, "utf8");
     await rename(tempPath, finalPath);
 
@@ -81,51 +98,77 @@ export async function writeToneMapConfig(
         enabled,
         sdrWhiteLevel: white,
         inputMaxLuminance: peak,
-        sourceColorMode,
-        sourceMode
+        detectionMode,
+        detectionModeNumber: mode
     };
 }
 
 export async function startNativeFix(_event: Electron.IpcMainInvokeEvent) {
     const files = await checkNativeFiles();
+
     if (!files.ok)
         return files;
 
-    const child = spawn(files.injector!, [
-        "--auto",
-        "--dll", files.dll!,
-        "--wait", "300"
-    ], {
-        detached: true,
-        windowsHide: true,
-        stdio: "ignore"
-    });
+    const child = spawn(
+        files.injector!,
+        [
+            "--auto",
+            "--dll", files.dll!,
+            "--wait", "300"
+        ],
+        {
+            detached: true,
+            windowsHide: true,
+            stdio: "ignore"
+        }
+    );
 
     child.unref();
-    return { ok: true, helperPid: child.pid, injector: files.injector, dll: files.dll };
+
+    return {
+        ok: true,
+        helperPid: child.pid,
+        injector: files.injector,
+        dll: files.dll
+    };
 }
 
 export async function readNativeStatus(_event: Electron.IpcMainInvokeEvent) {
     const dir = tmpdir();
+
     const names = (await readdir(dir))
-        .filter(name => /^DiscordHDRFix-v100-\d+\.json$/i.test(name));
+        .filter(name => /^DiscordHDRFix-v101-\d+\.json$/i.test(name));
 
     if (names.length === 0)
         return null;
 
-    const entries = await Promise.all(names.map(async name => {
-        const path = join(dir, name);
-        const info = await stat(path);
-        return { name, path, mtimeMs: info.mtimeMs };
-    }));
+    const entries = await Promise.all(
+        names.map(async name => {
+            const path = join(dir, name);
+            const info = await stat(path);
+            return {
+                name,
+                path,
+                mtimeMs: info.mtimeMs
+            };
+        })
+    );
 
     entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
     const newest = entries[0];
     const raw = await readFile(newest.path, "utf8");
 
     try {
-        return { statusFile: newest.path, ...JSON.parse(raw) };
+        return {
+            statusFile: newest.path,
+            ...JSON.parse(raw)
+        };
     } catch {
-        return { statusFile: newest.path, parseError: true, raw };
+        return {
+            statusFile: newest.path,
+            parseError: true,
+            raw
+        };
     }
 }

@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix v1.0.0 Windows x64
+name: Build DiscordHDRFix v1.0.1 Auto Test Windows x64
 
 on:
   workflow_dispatch:
@@ -39,18 +39,27 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
           $injector = "build\Release\DiscordHDRFix.Injector.exe"
           $dll = "build\Release\DiscordHDRFix.Native.dll"
-          if (-not (Test-Path $injector)) { throw "Missing $injector" }
-          if (-not (Test-Path $dll)) { throw "Missing $dll" }
-          Get-Item $injector, $dll | Format-Table Name, Length, LastWriteTime
 
-      - name: Stage friend-ready package
+          if (-not (Test-Path $injector)) {
+            throw "Missing $injector"
+          }
+
+          if (-not (Test-Path $dll)) {
+            throw "Missing $dll"
+          }
+
+          Get-Item $injector, $dll |
+            Format-Table Name, Length, LastWriteTime
+
+      - name: Stage test package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v1.0.0"
+          $root = "package\DiscordHDRFix-v1.0.1-auto-test"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -75,13 +84,15 @@ jobs:
           )
 
           $hashes |
-            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+            ForEach-Object {
+              "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))"
+            } |
             Set-Content -Encoding ascii (Join-Path $root "SHA256SUMS.txt")
 
       - name: Upload Windows x64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v1.0.0-windows-x64
-          path: package/DiscordHDRFix-v1.0.0
+          name: DiscordHDRFix-v1.0.1-auto-test-windows-x64
+          path: package/DiscordHDRFix-v1.0.1-auto-test
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 14

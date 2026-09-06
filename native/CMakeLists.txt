@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(DiscordHDRFixNative LANGUAGES CXX)
+project(DiscordHDRFixNative LANGUAGES CXX ASM_MASM)
 
 if(NOT WIN32)
     message(FATAL_ERROR "DiscordHDRFix native patch is Windows-only.")
@@ -15,10 +15,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(DiscordHDRFixNative SHARED
     probe/dllmain.cpp
+    probe/relay.asm
 )
 
 set_target_properties(DiscordHDRFixNative PROPERTIES
     OUTPUT_NAME "DiscordHDRFix.Native"
+)
+
+set_source_files_properties(
+    probe/relay.asm
+    PROPERTIES
+    LANGUAGE ASM_MASM
 )
 
 target_compile_definitions(DiscordHDRFixNative PRIVATE

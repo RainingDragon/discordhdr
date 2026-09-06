@@ -1,14 +1,12 @@
 #include <windows.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <limits>
+#include <cwchar>
 
-namespace {
 
 // Exact analyzed Windows discord_voice.node supplied by the tester.
 // SHA-256:
@@ -16,30 +14,30 @@ namespace {
 constexpr DWORD kExpectedTimeDateStamp = 0x6a95b8a4;
 constexpr DWORD kExpectedSizeOfImage = 0x00fd8000;
 
+constexpr std::uintptr_t kVideoHookFrameSaveRva = 0x003fcdca;
 constexpr std::uintptr_t kVideoHookNullMetadataRva = 0x003fd443;
 constexpr std::uintptr_t kVideoHookRendererCallRva = 0x003fd462;
 constexpr std::uintptr_t kVideoHookReturnRva = 0x003fd467;
 constexpr std::uintptr_t kRendererWrapperRva = 0x0052cad0;
 
-// Renderer source descriptor fields recovered from the exact binary:
-// +0x178 = DXGI_FORMAT (u32)
-// +0x17c = source gamut / primaries enum
-//          0 = Rec709, 1 = Rec2020, 2 = Arc
-// +0x17d = transfer enum
-//          0 = Linear, 1 = sRGB, 2 = SMPTE ST 2084 / PQ
+// Independent use of the same WumpusFrame::is_source_hdr byte elsewhere in
+// discord_voice.node. We verify this instruction before patching so an update
+// cannot silently change the layout we depend on.
+constexpr std::uintptr_t kIndependentIsSourceHdrReadRva = 0x005ddaa1;
+
+// At the Video Hook renderer callsite:
+//   r12 = WumpusFrame*
+//   byte [r12 + 0x1da] = WumpusFrame::is_source_hdr
+constexpr std::size_t kWumpusIsSourceHdrOffset = 0x1da;
+
+// Renderer source descriptor fields:
+//   +0x178 = DXGI_FORMAT (u32)
+//   +0x17c = primaries/gamut enum
+//   +0x17d = transfer-function enum
 constexpr std::size_t kSourceFormatOffset = 0x178;
 constexpr std::size_t kSourcePrimariesOffset = 0x17c;
 constexpr std::size_t kSourceTransferOffset = 0x17d;
 
-constexpr std::uint8_t kRec709 = 0;
-constexpr std::uint8_t kRec2020 = 1;
-constexpr std::uint8_t kArc = 2;
-
-constexpr std::uint8_t kLinear = 0;
-constexpr std::uint8_t kSrgb = 1;
-constexpr std::uint8_t kSt2084 = 2;
-
-// DXGI formats relevant to the renderer's own HDR branches.
 constexpr std::uint32_t kDxgiR16G16B16A16Float = 10;
 constexpr std::uint32_t kDxgiR10G10B10A2Unorm = 24;
 
@@ -53,57 +51,74 @@ struct HdrMetadata {
 static_assert(sizeof(HdrMetadata) == 12);
 static_assert(offsetof(HdrMetadata, state) == 8);
 
-enum class SourceColorMode : std::uint32_t {
-    Preserve = 0,
-    AutoHdrByFormat = 1,
-    Rec709Linear = 2,
-    Rec709Srgb = 3,
-    Rec2020Linear = 4,
-    Rec2020Srgb = 5,
-    Rec2020St2084 = 6
+enum class DetectionMode : LONG {
+    Automatic = 0,
+    ForceSdr = 1,
+    ForceHdr10 = 2,
+    ForceScRgb = 3
+};
+
+enum class Decision : LONG {
+    DisabledBypass = 0,
+    SdrBypass = 1,
+    Hdr10 = 2,
+    ScRgb = 3,
+    HdrUnknownFormat = 4
 };
 
 struct Config {
     bool enabled = true;
     float white = 460.0f;
     float peak = 1000.0f;
-    SourceColorMode sourceColorMode = SourceColorMode::AutoHdrByFormat;
+    DetectionMode detectionMode = DetectionMode::Automatic;
 };
 
-using RendererFn = void* (__fastcall*)(
-    void*, void*, void*, void*,
-    void*, void*, void*, void*, void*
-);
+// These symbols are intentionally C linkage because probe/relay.asm references
+// them directly. LONG/LONG64 are naturally aligned globals on x64.
+extern "C" {
 
-RendererFn g_originalRenderer = nullptr;
+volatile LONG g_DH_RuntimeEnabled = 1;
+volatile LONG g_DH_DetectionMode = static_cast<LONG>(DetectionMode::Automatic);
+
+void* volatile g_DH_ActiveMetadataPtr = nullptr;
+void* volatile g_DH_OriginalRenderer = nullptr;
+
+volatile LONG64 g_DH_RendererCalls = 0;
+volatile LONG64 g_DH_DisabledBypassFrames = 0;
+volatile LONG64 g_DH_SdrFramesBypassed = 0;
+volatile LONG64 g_DH_HdrFramesCorrected = 0;
+volatile LONG64 g_DH_Hdr10Frames = 0;
+volatile LONG64 g_DH_ScRgbFrames = 0;
+volatile LONG64 g_DH_HdrUnknownFormatFrames = 0;
+volatile LONG64 g_DH_MetadataInjected = 0;
+volatile LONG64 g_DH_SourceColorOverrides = 0;
+
+volatile LONG g_DH_LastSourceIsHdr = -1;
+volatile LONG g_DH_LastSourceFormat = -1;
+volatile LONG g_DH_LastOriginalPrimaries = -1;
+volatile LONG g_DH_LastOriginalTransfer = -1;
+volatile LONG g_DH_LastEffectivePrimaries = -1;
+volatile LONG g_DH_LastEffectiveTransfer = -1;
+volatile LONG g_DH_LastDecision = -1;
+volatile LONG g_DH_LastOriginalHdrMetadataNull = -1;
+
+void DiscordHDRFixRelay();
+
+} // extern "C"
 
 alignas(16) HdrMetadata g_metadataRing[256]{};
-std::atomic<unsigned> g_metadataWriteIndex{0};
-void* volatile g_activeMetadataPtr = nullptr;
+volatile LONG g_metadataWriteIndex = 0;
 
-std::atomic<bool> g_enabled{true};
-std::atomic<std::uint32_t> g_whiteBits{0};
-std::atomic<std::uint32_t> g_peakBits{0};
-std::atomic<std::uint32_t> g_sourceMode{0};
-std::atomic<bool> g_hookInstalled{false};
+volatile LONG g_hookInstalled = 0;
+volatile LONG g_whiteBits = 0;
+volatile LONG g_peakBits = 0;
 
-std::atomic<std::uint32_t> g_lastOriginalFormat{0xffffffffu};
-std::atomic<std::uint32_t> g_lastOriginalPrimaries{0xffffffffu};
-std::atomic<std::uint32_t> g_lastOriginalTransfer{0xffffffffu};
-std::atomic<std::uint32_t> g_lastEffectivePrimaries{0xffffffffu};
-std::atomic<std::uint32_t> g_lastEffectiveTransfer{0xffffffffu};
-
-std::atomic<unsigned long long> g_rendererCalls{0};
-std::atomic<unsigned long long> g_metadataInjectedCalls{0};
-std::atomic<unsigned long long> g_sourceOverrideCalls{0};
-std::atomic<bool> g_lastOriginalHdrMetadataNull{true};
-
-std::uint8_t* g_relay = nullptr;
+std::uint8_t* g_nearRelay = nullptr;
 
 wchar_t g_statusPath[MAX_PATH]{};
 wchar_t g_configPath[MAX_PATH]{};
-char g_signature[160] = "waiting for discord_voice.node";
-char g_error[384]{};
+char g_signature[192] = "waiting for discord_voice.node";
+char g_error[512]{};
 
 std::uint32_t FloatBits(float v) {
     std::uint32_t bits = 0;
@@ -117,6 +132,18 @@ float BitsFloat(std::uint32_t bits) {
     return v;
 }
 
+void StoreFloatBits(volatile LONG* target, float value) {
+    InterlockedExchange(target, static_cast<LONG>(FloatBits(value)));
+}
+
+float LoadFloatBits(volatile LONG* source, float fallback) {
+    const auto bits = static_cast<std::uint32_t>(
+        InterlockedCompareExchange(source, 0, 0)
+    );
+    const float value = BitsFloat(bits);
+    return value > 0.0f ? value : fallback;
+}
+
 void SetSignature(const char* text) {
     strncpy_s(g_signature, text ? text : "", _TRUNCATE);
 }
@@ -125,7 +152,7 @@ void SetError(const char* text) {
     strncpy_s(g_error, text ? text : "", _TRUNCATE);
 }
 
-const char* FormatName(std::uint32_t format) {
+const char* FormatName(LONG format) {
     switch (format) {
     case 10: return "R16G16B16A16_FLOAT";
     case 24: return "R10G10B10A2_UNORM";
@@ -136,7 +163,7 @@ const char* FormatName(std::uint32_t format) {
     }
 }
 
-const char* PrimariesName(std::uint32_t value) {
+const char* PrimariesName(LONG value) {
     switch (value) {
     case 0: return "Rec709";
     case 1: return "Rec2020";
@@ -145,7 +172,7 @@ const char* PrimariesName(std::uint32_t value) {
     }
 }
 
-const char* TransferName(std::uint32_t value) {
+const char* TransferName(LONG value) {
     switch (value) {
     case 0: return "Linear";
     case 1: return "sRGB";
@@ -154,16 +181,24 @@ const char* TransferName(std::uint32_t value) {
     }
 }
 
-const char* SourceModeName(std::uint32_t value) {
-    switch (static_cast<SourceColorMode>(value)) {
-    case SourceColorMode::Preserve: return "preserve";
-    case SourceColorMode::AutoHdrByFormat: return "auto_hdr_by_dxgi_format";
-    case SourceColorMode::Rec709Linear: return "rec709_linear";
-    case SourceColorMode::Rec709Srgb: return "rec709_srgb";
-    case SourceColorMode::Rec2020Linear: return "rec2020_linear";
-    case SourceColorMode::Rec2020Srgb: return "rec2020_srgb";
-    case SourceColorMode::Rec2020St2084: return "rec2020_st2084";
-    default: return "preserve";
+const char* DetectionModeName(LONG value) {
+    switch (static_cast<DetectionMode>(value)) {
+    case DetectionMode::Automatic: return "automatic";
+    case DetectionMode::ForceSdr: return "force_sdr";
+    case DetectionMode::ForceHdr10: return "force_hdr10_pq";
+    case DetectionMode::ForceScRgb: return "force_scrgb";
+    default: return "automatic";
+    }
+}
+
+const char* DecisionName(LONG value) {
+    switch (static_cast<Decision>(value)) {
+    case Decision::DisabledBypass: return "disabled_bypass";
+    case Decision::SdrBypass: return "sdr_bypass";
+    case Decision::Hdr10: return "hdr10_rec2020_pq";
+    case Decision::ScRgb: return "scrgb_rec709_linear";
+    case Decision::HdrUnknownFormat: return "hdr_unknown_format_metadata_only";
+    default: return "not_observed";
     }
 }
 
@@ -175,7 +210,7 @@ void BuildPaths() {
 
     swprintf_s(
         g_statusPath,
-        L"%sDiscordHDRFix-v100-%lu.json",
+        L"%sDiscordHDRFix-v101-%lu.json",
         temp,
         GetCurrentProcessId()
     );
@@ -201,22 +236,29 @@ void BuildPaths() {
 
 Config CurrentConfig() {
     Config c;
-    c.enabled = g_enabled.load(std::memory_order_relaxed);
 
-    c.white = BitsFloat(g_whiteBits.load(std::memory_order_relaxed));
-    if (!(c.white > 0.0f))
-        c.white = 460.0f;
+    c.enabled =
+        InterlockedCompareExchange(
+            &g_DH_RuntimeEnabled,
+            0,
+            0
+        ) != 0;
 
-    c.peak = BitsFloat(g_peakBits.load(std::memory_order_relaxed));
-    if (!(c.peak > 0.0f))
-        c.peak = 1000.0f;
+    c.white = LoadFloatBits(&g_whiteBits, 460.0f);
+    c.peak = LoadFloatBits(&g_peakBits, 1000.0f);
 
-    const auto mode = g_sourceMode.load(std::memory_order_relaxed);
-    c.sourceColorMode =
-        mode <= static_cast<std::uint32_t>(SourceColorMode::Rec2020St2084)
-            ? static_cast<SourceColorMode>(mode)
-            : SourceColorMode::AutoHdrByFormat;
+    LONG mode = InterlockedCompareExchange(
+        &g_DH_DetectionMode,
+        0,
+        0
+    );
 
+    if (mode < static_cast<LONG>(DetectionMode::Automatic) ||
+        mode > static_cast<LONG>(DetectionMode::ForceScRgb)) {
+        mode = static_cast<LONG>(DetectionMode::Automatic);
+    }
+
+    c.detectionMode = static_cast<DetectionMode>(mode);
     return c;
 }
 
@@ -228,9 +270,10 @@ Config ReadConfig() {
         return c;
 
     char line[256]{};
+
     while (fgets(line, static_cast<int>(sizeof(line)), f)) {
         int enabled = 0;
-        unsigned sourceMode = 0;
+        unsigned detectionMode = 0;
         float value = 0.0f;
 
         if (sscanf_s(line, "enabled=%d", &enabled) == 1) {
@@ -248,11 +291,11 @@ Config ReadConfig() {
             continue;
         }
 
-        if (sscanf_s(line, "source_mode=%u", &sourceMode) == 1) {
-            if (sourceMode <=
-                static_cast<unsigned>(SourceColorMode::Rec2020St2084)) {
-                c.sourceColorMode =
-                    static_cast<SourceColorMode>(sourceMode);
+        if (sscanf_s(line, "detection_mode=%u", &detectionMode) == 1) {
+            if (detectionMode <=
+                static_cast<unsigned>(DetectionMode::ForceScRgb)) {
+                c.detectionMode =
+                    static_cast<DetectionMode>(detectionMode);
             }
             continue;
         }
@@ -267,8 +310,9 @@ Config ReadConfig() {
 }
 
 void PublishConfig(const Config& c) {
+    const LONG sequence = InterlockedIncrement(&g_metadataWriteIndex);
     const unsigned index =
-        g_metadataWriteIndex.fetch_add(1, std::memory_order_relaxed) % 256u;
+        static_cast<unsigned>(sequence) % 256u;
 
     HdrMetadata& m = g_metadataRing[index];
     m.sdrWhiteLevel = c.white;
@@ -281,186 +325,30 @@ void PublishConfig(const Config& c) {
     MemoryBarrier();
 
     InterlockedExchangePointer(
-        reinterpret_cast<PVOID volatile*>(&g_activeMetadataPtr),
-        c.enabled ? static_cast<void*>(&m) : nullptr
+        reinterpret_cast<PVOID volatile*>(&g_DH_ActiveMetadataPtr),
+        static_cast<void*>(&m)
     );
 
-    g_enabled.store(c.enabled, std::memory_order_relaxed);
-    g_whiteBits.store(FloatBits(c.white), std::memory_order_relaxed);
-    g_peakBits.store(FloatBits(c.peak), std::memory_order_relaxed);
-    g_sourceMode.store(
-        static_cast<std::uint32_t>(c.sourceColorMode),
-        std::memory_order_relaxed
+    InterlockedExchange(
+        &g_DH_RuntimeEnabled,
+        c.enabled ? 1 : 0
     );
+
+    InterlockedExchange(
+        &g_DH_DetectionMode,
+        static_cast<LONG>(c.detectionMode)
+    );
+
+    StoreFloatBits(&g_whiteBits, c.white);
+    StoreFloatBits(&g_peakBits, c.peak);
 }
 
-void ChooseEffectiveColor(
-    SourceColorMode mode,
-    std::uint32_t format,
-    std::uint8_t originalPrimaries,
-    std::uint8_t originalTransfer,
-    std::uint8_t& effectivePrimaries,
-    std::uint8_t& effectiveTransfer
-) {
-    effectivePrimaries = originalPrimaries;
-    effectiveTransfer = originalTransfer;
-
-    switch (mode) {
-    case SourceColorMode::Preserve:
-        return;
-
-    case SourceColorMode::AutoHdrByFormat:
-        if (format == kDxgiR16G16B16A16Float) {
-            effectivePrimaries = kRec709;
-            effectiveTransfer = kLinear;
-        } else if (format == kDxgiR10G10B10A2Unorm) {
-            effectivePrimaries = kRec2020;
-            effectiveTransfer = kSt2084;
-        }
-        return;
-
-    case SourceColorMode::Rec709Linear:
-        effectivePrimaries = kRec709;
-        effectiveTransfer = kLinear;
-        return;
-
-    case SourceColorMode::Rec709Srgb:
-        effectivePrimaries = kRec709;
-        effectiveTransfer = kSrgb;
-        return;
-
-    case SourceColorMode::Rec2020Linear:
-        effectivePrimaries = kRec2020;
-        effectiveTransfer = kLinear;
-        return;
-
-    case SourceColorMode::Rec2020Srgb:
-        effectivePrimaries = kRec2020;
-        effectiveTransfer = kSrgb;
-        return;
-
-    case SourceColorMode::Rec2020St2084:
-        effectivePrimaries = kRec2020;
-        effectiveTransfer = kSt2084;
-        return;
-    }
-}
-
-extern "C" __declspec(noinline) void* __fastcall HookRenderer(
-    void* a1,
-    void* a2,
-    void* a3,
-    void* a4,
-    void* a5,
-    void* a6,
-    void* a7,
-    void* a8,
-    void* a9
-) {
-    g_rendererCalls.fetch_add(1, std::memory_order_relaxed);
-    g_lastOriginalHdrMetadataNull.store(a9 == nullptr, std::memory_order_relaxed);
-
-    std::uint8_t* source = nullptr;
-    std::uint8_t originalPrimaries = 0;
-    std::uint8_t originalTransfer = 0;
-    bool sourceChanged = false;
-
-    if (a4) {
-        source = static_cast<std::uint8_t*>(a4);
-
-        const std::uint32_t format =
-            *reinterpret_cast<std::uint32_t*>(
-                source + kSourceFormatOffset
-            );
-
-        originalPrimaries =
-            *(source + kSourcePrimariesOffset);
-
-        originalTransfer =
-            *(source + kSourceTransferOffset);
-
-        g_lastOriginalFormat.store(format, std::memory_order_relaxed);
-        g_lastOriginalPrimaries.store(
-            originalPrimaries,
-            std::memory_order_relaxed
-        );
-        g_lastOriginalTransfer.store(
-            originalTransfer,
-            std::memory_order_relaxed
-        );
-
-        std::uint8_t effectivePrimaries = originalPrimaries;
-        std::uint8_t effectiveTransfer = originalTransfer;
-
-        const auto mode = static_cast<SourceColorMode>(
-            g_sourceMode.load(std::memory_order_relaxed)
-        );
-
-        ChooseEffectiveColor(
-            mode,
-            format,
-            originalPrimaries,
-            originalTransfer,
-            effectivePrimaries,
-            effectiveTransfer
-        );
-
-        sourceChanged =
-            effectivePrimaries != originalPrimaries ||
-            effectiveTransfer != originalTransfer;
-
-        if (sourceChanged) {
-            *(source + kSourcePrimariesOffset) = effectivePrimaries;
-            *(source + kSourceTransferOffset) = effectiveTransfer;
-
-            g_sourceOverrideCalls.fetch_add(
-                1,
-                std::memory_order_relaxed
-            );
-        }
-
-        g_lastEffectivePrimaries.store(
-            effectivePrimaries,
-            std::memory_order_relaxed
-        );
-        g_lastEffectiveTransfer.store(
-            effectiveTransfer,
-            std::memory_order_relaxed
-        );
-    }
-
-    void* metadata = a9;
-
-    if (g_enabled.load(std::memory_order_relaxed)) {
-        metadata = InterlockedCompareExchangePointer(
-            reinterpret_cast<PVOID volatile*>(&g_activeMetadataPtr),
-            nullptr,
-            nullptr
-        );
-
-        if (metadata) {
-            g_metadataInjectedCalls.fetch_add(
-                1,
-                std::memory_order_relaxed
-            );
-        }
-    }
-
-    // The source color override is intentionally scoped to Discord's renderer
-    // call. Restoring the descriptor afterward avoids leaking our temporary
-    // interpretation into unrelated Discord state and makes live mode changes
-    // reversible.
-    void* result = g_originalRenderer(
-        a1, a2, a3, a4,
-        a5, a6, a7, a8, metadata
-    );
-
-    if (source && sourceChanged) {
-        *(source + kSourcePrimariesOffset) = originalPrimaries;
-        *(source + kSourceTransferOffset) = originalTransfer;
-    }
-
-    return result;
+bool ConfigChanged(const Config& a, const Config& b) {
+    return
+        a.enabled != b.enabled ||
+        a.white != b.white ||
+        a.peak != b.peak ||
+        a.detectionMode != b.detectionMode;
 }
 
 bool EqualBytes(
@@ -499,6 +387,11 @@ bool VerifyDiscordBuild(HMODULE voice) {
         return false;
     }
 
+    // Function establishes r12 = rdx (WumpusFrame*) near entry.
+    constexpr std::uint8_t frameSave[] = {
+        0x49, 0x89, 0xd4
+    };
+
     constexpr std::uint8_t nullArg[] = {
         0x48, 0xc7, 0x44, 0x24, 0x40,
         0x00, 0x00, 0x00, 0x00
@@ -515,12 +408,28 @@ bool VerifyDiscordBuild(HMODULE voice) {
         0x48, 0x83, 0xec, 0x68
     };
 
+    // Independent direct bool read:
+    // movzx eax, byte ptr [r13+0x1da]
+    constexpr std::uint8_t independentHdrRead[] = {
+        0x41, 0x0f, 0xb6, 0x85,
+        0xda, 0x01, 0x00, 0x00
+    };
+
+    if (!EqualBytes(
+            base + kVideoHookFrameSaveRva,
+            frameSave,
+            sizeof(frameSave))) {
+        SetSignature("Video Hook WumpusFrame register signature mismatch");
+        SetError("r12=WumpusFrame signature changed; refusing to patch");
+        return false;
+    }
+
     if (!EqualBytes(
             base + kVideoHookNullMetadataRva,
             nullArg,
             sizeof(nullArg))) {
-        SetSignature("video-hook signature mismatch");
-        SetError("video-hook HDR metadata callsite signature did not match");
+        SetSignature("Video Hook null HDR metadata signature mismatch");
+        SetError("Video Hook HDR metadata callsite changed");
         return false;
     }
 
@@ -528,8 +437,8 @@ bool VerifyDiscordBuild(HMODULE voice) {
             base + kVideoHookRendererCallRva,
             callBytes,
             sizeof(callBytes))) {
-        SetSignature("video-hook renderer call mismatch");
-        SetError("video-hook renderer CALL signature did not match");
+        SetSignature("Video Hook renderer call signature mismatch");
+        SetError("Video Hook renderer CALL changed");
         return false;
     }
 
@@ -538,10 +447,20 @@ bool VerifyDiscordBuild(HMODULE voice) {
             wrapperPrologue,
             sizeof(wrapperPrologue))) {
         SetSignature("renderer signature mismatch");
-        SetError("renderer wrapper signature did not match");
+        SetError("renderer wrapper signature changed");
         return false;
     }
 
+    if (!EqualBytes(
+            base + kIndependentIsSourceHdrReadRva,
+            independentHdrRead,
+            sizeof(independentHdrRead))) {
+        SetSignature("is_source_hdr layout signature mismatch");
+        SetError("WumpusFrame is_source_hdr offset changed; refusing to patch");
+        return false;
+    }
+
+    // Verify original rel32 CALL resolves to the renderer wrapper we analyzed.
     const auto* call = base + kVideoHookRendererCallRva;
     std::int32_t displacement = 0;
     std::memcpy(&displacement, call + 1, sizeof(displacement));
@@ -551,13 +470,15 @@ bool VerifyDiscordBuild(HMODULE voice) {
         static_cast<std::intptr_t>(displacement);
 
     if (destination !=
-        reinterpret_cast<std::uintptr_t>(base + kRendererWrapperRva)) {
+        reinterpret_cast<std::uintptr_t>(
+            base + kRendererWrapperRva
+        )) {
         SetSignature("renderer call target mismatch");
         SetError("renderer wrapper destination changed");
         return false;
     }
 
-    SetSignature("matched exact analyzed build");
+    SetSignature("matched exact analyzed build + is_source_hdr layout");
     SetError("");
     return true;
 }
@@ -574,7 +495,9 @@ void* AllocateNear(void* target, SIZE_T size) {
     GetSystemInfo(&info);
 
     const std::uintptr_t granularity =
-        static_cast<std::uintptr_t>(info.dwAllocationGranularity);
+        static_cast<std::uintptr_t>(
+            info.dwAllocationGranularity
+        );
 
     const std::uintptr_t targetAddress =
         reinterpret_cast<std::uintptr_t>(target);
@@ -585,6 +508,7 @@ void* AllocateNear(void* target, SIZE_T size) {
         reinterpret_cast<std::uintptr_t>(
             info.lpMinimumApplicationAddress
         );
+
     const std::uintptr_t processMax =
         reinterpret_cast<std::uintptr_t>(
             info.lpMaximumApplicationAddress
@@ -602,6 +526,7 @@ void* AllocateNear(void* target, SIZE_T size) {
 
     while (cursor < maximum) {
         MEMORY_BASIC_INFORMATION mbi{};
+
         if (VirtualQuery(
                 reinterpret_cast<void*>(cursor),
                 &mbi,
@@ -611,12 +536,16 @@ void* AllocateNear(void* target, SIZE_T size) {
 
         const std::uintptr_t regionBase =
             reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+
         const std::uintptr_t regionEnd =
             regionBase + mbi.RegionSize;
 
         if (mbi.State == MEM_FREE) {
             const std::uintptr_t candidate =
-                AlignUp(std::max(cursor, regionBase), granularity);
+                AlignUp(
+                    std::max(cursor, regionBase),
+                    granularity
+                );
 
             if (candidate + size <= regionEnd &&
                 candidate + size <= maximum) {
@@ -644,39 +573,39 @@ void WriteImmediate(std::uint8_t* dest, T value) {
     std::memcpy(dest, &value, sizeof(value));
 }
 
-bool BuildRelay(std::uint8_t* callSite) {
+bool BuildNearRelay(std::uint8_t* callSite) {
     constexpr SIZE_T allocationSize = 0x1000;
 
-    g_relay = static_cast<std::uint8_t*>(
+    g_nearRelay = static_cast<std::uint8_t*>(
         AllocateNear(callSite, allocationSize)
     );
 
-    if (!g_relay) {
-        SetError("VirtualAlloc failed for Video Hook relay");
+    if (!g_nearRelay) {
+        SetError("VirtualAlloc failed for near relay");
         return false;
     }
 
-    std::memset(g_relay, 0xcc, allocationSize);
+    std::memset(g_nearRelay, 0xcc, allocationSize);
 
     std::size_t p = 0;
 
-    // mov rax, HookRenderer
-    g_relay[p++] = 0x48;
-    g_relay[p++] = 0xb8;
+    // mov rax, DiscordHDRFixRelay
+    g_nearRelay[p++] = 0x48;
+    g_nearRelay[p++] = 0xb8;
 
     WriteImmediate(
-        g_relay + p,
-        reinterpret_cast<std::uintptr_t>(&HookRenderer)
+        g_nearRelay + p,
+        reinterpret_cast<std::uintptr_t>(&DiscordHDRFixRelay)
     );
     p += sizeof(std::uintptr_t);
 
     // jmp rax
-    g_relay[p++] = 0xff;
-    g_relay[p++] = 0xe0;
+    g_nearRelay[p++] = 0xff;
+    g_nearRelay[p++] = 0xe0;
 
     FlushInstructionCache(
         GetCurrentProcess(),
-        g_relay,
+        g_nearRelay,
         allocationSize
     );
 
@@ -687,22 +616,25 @@ bool PatchVideoHookCall(HMODULE voice) {
     auto* base = reinterpret_cast<std::uint8_t*>(voice);
     auto* callSite = base + kVideoHookRendererCallRva;
 
-    g_originalRenderer = reinterpret_cast<RendererFn>(
-        base + kRendererWrapperRva
+    InterlockedExchangePointer(
+        reinterpret_cast<PVOID volatile*>(&g_DH_OriginalRenderer),
+        static_cast<void*>(base + kRendererWrapperRva)
     );
 
-    if (!BuildRelay(callSite))
+    if (!BuildNearRelay(callSite))
         return false;
 
     const std::intptr_t from =
         reinterpret_cast<std::intptr_t>(callSite + 5);
+
     const std::intptr_t to =
-        reinterpret_cast<std::intptr_t>(g_relay);
+        reinterpret_cast<std::intptr_t>(g_nearRelay);
 
     const std::intptr_t delta = to - from;
-    if (delta < std::numeric_limits<std::int32_t>::min() ||
-        delta > std::numeric_limits<std::int32_t>::max()) {
-        SetError("Video Hook relay is outside CALL rel32 range");
+
+    if (delta < static_cast<std::intptr_t>(INT32_MIN) ||
+        delta > static_cast<std::intptr_t>(INT32_MAX)) {
+        SetError("near relay is outside CALL rel32 range");
         return false;
     }
 
@@ -714,6 +646,7 @@ bool PatchVideoHookCall(HMODULE voice) {
     );
 
     DWORD oldProtection = 0;
+
     if (!VirtualProtect(
             callSite,
             sizeof(patch),
@@ -742,69 +675,96 @@ bool PatchVideoHookCall(HMODULE voice) {
     return true;
 }
 
+unsigned long long ReadCounter(volatile LONG64* value) {
+    return static_cast<unsigned long long>(
+        InterlockedCompareExchange64(value, 0, 0)
+    );
+}
+
+LONG ReadLong(volatile LONG* value) {
+    return InterlockedCompareExchange(value, 0, 0);
+}
+
 void WriteStatus() {
     const float white =
-        BitsFloat(g_whiteBits.load(std::memory_order_relaxed));
+        LoadFloatBits(&g_whiteBits, 460.0f);
+
     const float peak =
-        BitsFloat(g_peakBits.load(std::memory_order_relaxed));
+        LoadFloatBits(&g_peakBits, 1000.0f);
 
-    const auto sourceMode =
-        g_sourceMode.load(std::memory_order_relaxed);
+    const LONG mode = ReadLong(&g_DH_DetectionMode);
+    const LONG format = ReadLong(&g_DH_LastSourceFormat);
+    const LONG sourceIsHdr = ReadLong(&g_DH_LastSourceIsHdr);
+    const LONG originalPrimaries =
+        ReadLong(&g_DH_LastOriginalPrimaries);
+    const LONG originalTransfer =
+        ReadLong(&g_DH_LastOriginalTransfer);
+    const LONG effectivePrimaries =
+        ReadLong(&g_DH_LastEffectivePrimaries);
+    const LONG effectiveTransfer =
+        ReadLong(&g_DH_LastEffectiveTransfer);
+    const LONG decision =
+        ReadLong(&g_DH_LastDecision);
+    const LONG originalMetadataNull =
+        ReadLong(&g_DH_LastOriginalHdrMetadataNull);
 
-    const auto format =
-        g_lastOriginalFormat.load(std::memory_order_relaxed);
-    const auto originalPrimaries =
-        g_lastOriginalPrimaries.load(std::memory_order_relaxed);
-    const auto originalTransfer =
-        g_lastOriginalTransfer.load(std::memory_order_relaxed);
-    const auto effectivePrimaries =
-        g_lastEffectivePrimaries.load(std::memory_order_relaxed);
-    const auto effectiveTransfer =
-        g_lastEffectiveTransfer.load(std::memory_order_relaxed);
-
-    char json[6144]{};
+    char json[8192]{};
 
     _snprintf_s(
         json,
         sizeof(json),
         _TRUNCATE,
         "{\n"
-        "  \"version\": \"1.0.0\",\n"
+        "  \"version\": \"1.0.1-auto-test\",\n"
         "  \"pid\": %lu,\n"
-        "  \"mode\": \"hdr-metadata-plus-source-colorspace\",\n"
+        "  \"mode\": \"automatic-hdr-sdr-detection\",\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"
+        "  \"detection_source\": \"WumpusFrame.is_source_hdr\",\n"
+        "  \"wumpus_is_source_hdr_offset\": \"0x1da\",\n"
         "  \"renderer_wrapper_rva\": \"0x52cad0\",\n"
         "  \"video_hook_return_rva\": \"0x3fd467\",\n"
         "  \"enabled\": %s,\n"
+        "  \"detection_mode\": \"%s\",\n"
         "  \"sdr_white_level\": %.3f,\n"
         "  \"input_max_luminance\": %.3f,\n"
         "  \"metadata_state\": 1,\n"
         "  \"metadata_size\": 12,\n"
-        "  \"source_color_mode\": \"%s\",\n"
-        "  \"source_format\": %u,\n"
+        "  \"last_source_is_hdr\": %s,\n"
+        "  \"last_decision\": \"%s\",\n"
+        "  \"source_format\": %ld,\n"
         "  \"source_format_name\": \"%s\",\n"
-        "  \"original_primaries\": %u,\n"
+        "  \"original_primaries\": %ld,\n"
         "  \"original_primaries_name\": \"%s\",\n"
-        "  \"original_transfer\": %u,\n"
+        "  \"original_transfer\": %ld,\n"
         "  \"original_transfer_name\": \"%s\",\n"
-        "  \"effective_primaries\": %u,\n"
+        "  \"effective_primaries\": %ld,\n"
         "  \"effective_primaries_name\": \"%s\",\n"
-        "  \"effective_transfer\": %u,\n"
+        "  \"effective_transfer\": %ld,\n"
         "  \"effective_transfer_name\": \"%s\",\n"
         "  \"renderer_calls\": %llu,\n"
+        "  \"disabled_bypass_frames\": %llu,\n"
+        "  \"sdr_frames_bypassed\": %llu,\n"
+        "  \"hdr_frames_corrected\": %llu,\n"
+        "  \"hdr10_frames\": %llu,\n"
+        "  \"scrgb_frames\": %llu,\n"
+        "  \"hdr_unknown_format_frames\": %llu,\n"
         "  \"hdr_metadata_injected\": %llu,\n"
         "  \"source_color_overrides\": %llu,\n"
         "  \"last_original_hdr_metadata_null\": %s,\n"
         "  \"error\": \"%s\"\n"
         "}\n",
         GetCurrentProcessId(),
-        g_hookInstalled.load(std::memory_order_relaxed) ? "true" : "false",
+        ReadLong(&g_hookInstalled) ? "true" : "false",
         g_signature,
-        g_enabled.load(std::memory_order_relaxed) ? "true" : "false",
+        ReadLong(&g_DH_RuntimeEnabled) ? "true" : "false",
+        DetectionModeName(mode),
         static_cast<double>(white),
         static_cast<double>(peak),
-        SourceModeName(sourceMode),
+        sourceIsHdr < 0
+            ? "null"
+            : (sourceIsHdr ? "true" : "false"),
+        DecisionName(decision),
         format,
         FormatName(format),
         originalPrimaries,
@@ -815,10 +775,18 @@ void WriteStatus() {
         PrimariesName(effectivePrimaries),
         effectiveTransfer,
         TransferName(effectiveTransfer),
-        g_rendererCalls.load(std::memory_order_relaxed),
-        g_metadataInjectedCalls.load(std::memory_order_relaxed),
-        g_sourceOverrideCalls.load(std::memory_order_relaxed),
-        g_lastOriginalHdrMetadataNull.load(std::memory_order_relaxed) ? "true" : "false",
+        ReadCounter(&g_DH_RendererCalls),
+        ReadCounter(&g_DH_DisabledBypassFrames),
+        ReadCounter(&g_DH_SdrFramesBypassed),
+        ReadCounter(&g_DH_HdrFramesCorrected),
+        ReadCounter(&g_DH_Hdr10Frames),
+        ReadCounter(&g_DH_ScRgbFrames),
+        ReadCounter(&g_DH_HdrUnknownFormatFrames),
+        ReadCounter(&g_DH_MetadataInjected),
+        ReadCounter(&g_DH_SourceColorOverrides),
+        originalMetadataNull < 0
+            ? "null"
+            : (originalMetadataNull ? "true" : "false"),
         g_error
     );
 
@@ -839,6 +807,7 @@ void WriteStatus() {
         return;
 
     DWORD written = 0;
+
     WriteFile(
         f,
         json,
@@ -857,28 +826,14 @@ void WriteStatus() {
     );
 }
 
-bool ConfigChanged(const Config& a, const Config& b) {
-    return
-        a.enabled != b.enabled ||
-        a.white != b.white ||
-        a.peak != b.peak ||
-        a.sourceColorMode != b.sourceColorMode;
-}
-
 DWORD WINAPI WorkerThread(void*) {
     BuildPaths();
 
-    g_whiteBits.store(
-        FloatBits(460.0f),
-        std::memory_order_relaxed
-    );
-    g_peakBits.store(
-        FloatBits(1000.0f),
-        std::memory_order_relaxed
-    );
+    StoreFloatBits(&g_whiteBits, 460.0f);
+    StoreFloatBits(&g_peakBits, 1000.0f);
 
-    Config config = ReadConfig();
-    PublishConfig(config);
+    Config initial = ReadConfig();
+    PublishConfig(initial);
 
     SetSignature("waiting for discord_voice.node");
     SetError("");
@@ -909,7 +864,7 @@ DWORD WINAPI WorkerThread(void*) {
         return 0;
     }
 
-    g_hookInstalled.store(true, std::memory_order_release);
+    InterlockedExchange(&g_hookInstalled, 1);
     SetError("");
     WriteStatus();
 
@@ -927,8 +882,6 @@ DWORD WINAPI WorkerThread(void*) {
         Sleep(500);
     }
 }
-
-} // namespace
 
 BOOL WINAPI DllMain(
     HINSTANCE instance,

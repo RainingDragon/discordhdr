@@ -1,74 +1,70 @@
-# DiscordHDRFix v1.0.0 engineering notes
+# DiscordHDRFix v1.0.1 automatic detection engineering notes
 
-Target discord_voice.node SHA-256:
+## Exact target
 
+`discord_voice.node` SHA-256:
+
+```text
 54d452eefb5bd20f022dca1f93e3a92cf641e14283761720e4276f3fb0585db9
-
-Renderer callsite:
-
-- Video Hook renderer CALL: 0x003fd462
-- Shared renderer wrapper:  0x0052cad0
-
-At the wrapper entry, the fourth argument (`r9`) becomes the renderer's source
-descriptor. The renderer reads:
-
-```text
-descriptor + 0x178 : DXGI_FORMAT u32
-descriptor + 0x17c : gamut / primaries enum
-descriptor + 0x17d : transfer-function enum
 ```
 
-The enum strings and renderer branches establish:
+## Existing Video Hook callsite
 
 ```text
-primaries 0 = Rec709
-primaries 1 = Rec2020
-primaries 2 = Arc
-
-transfer 0 = Linear
-transfer 1 = sRGB
-transfer 2 = SMPTE ST 2084 / PQ
+RVA 0x003fcdca: mov r12, rdx
+...
+RVA 0x003fd443: mov qword ptr [rsp+0x40], 0
+RVA 0x003fd454: lea r9, [rsp+0x318]
+RVA 0x003fd462: call renderer
+RVA 0x003fd467: return address
 ```
 
-The renderer also explicitly branches on DXGI formats 10 and 24 for HDR paths:
+Thus at the patched CALL relay entry:
 
 ```text
-10 = DXGI_FORMAT_R16G16B16A16_FLOAT
-24 = DXGI_FORMAT_R10G10B10A2_UNORM
+r12       = WumpusFrame*
+r9        = renderer source descriptor
+[rsp+48h] = ninth renderer arg (HDR metadata) after CALL pushed return address
 ```
 
-v0.7 replaces the original renderer CALL with a nearby relay that jumps to a
-typed x64 hook function. The hook:
+## `is_source_hdr`
 
-1. Records the source format/primaries/transfer.
-2. Optionally changes only the stack-local source descriptor's primaries and
-   transfer bytes.
-3. Supplies the 12-byte HDR metadata object if enabled.
-4. Calls Discord's original renderer wrapper with every other argument intact.
-
-No texture copies, CPU readback, extra encoder, mirror window or audio changes.
-
-
-## v1.0.0 finalization
-
-Final defaults:
+The WumpusFrame serde field set includes:
 
 ```text
-source color mode: Auto HDR by DXGI format
-SDR white: 460
-input max luminance: 1000
+cursor
+surface
+region
+timestamp
+capture_subtype
+is_source_hdr
 ```
 
-The source descriptor primaries/transfer override is now scoped to the single renderer
-call: the original bytes are restored immediately after Discord's renderer returns.
-This prevents the diagnostic override from leaking into persistent Discord state and
-makes live mode changes reversible.
-
-The plugin still forces the proven routing:
+The final bool field resolves to:
 
 ```text
-hdrCaptureMode = never
-useVideoHook = true
-useGraphicsCapture = false
-useGraphicsCaptureApiLevel = 0
+WumpusFrame + 0x1da
 ```
+
+An independent consumer in the exact binary reads it at RVA `0x005ddaa1`:
+
+```asm
+movzx eax, byte ptr [r13+0x1da]
+```
+
+v1.0.1 verifies that exact instruction before patching.
+
+## Direct assembly relay
+
+Unlike v1.0.0's typed C++ renderer hook, v1.0.1 uses a small MASM leaf relay so
+the original Video Hook `r12` register is available directly.
+
+The relay:
+
+1. Records `is_source_hdr`.
+2. In Automatic mode, bypasses SDR completely.
+3. Corrects only HDR frames.
+4. Tail-jumps to Discord's existing renderer.
+5. Does not change RSP and does not make another call.
+
+No capture copy, CPU readback, extra encoder, mirror window, or audio changes.

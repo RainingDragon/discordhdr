@@ -20,13 +20,12 @@ const captureState = {
 
 async function pushNativeConfig(): Promise<void> {
     try {
-        const result = await Native.writeToneMapConfig(
-            settings.store.toneMapEnabled,
+        await Native.writeToneMapConfig(
+            settings.store.correctionEnabled,
             settings.store.sdrWhiteLevel,
             settings.store.inputMaxLuminance,
-            settings.store.sourceColorMode
+            settings.store.detectionMode
         );
-        logger.info("HDR runtime config updated:", result);
     } catch (error) {
         logger.error("Failed to update HDR runtime config:", error);
     }
@@ -36,60 +35,46 @@ async function startNativeFix(): Promise<void> {
     try {
         await pushNativeConfig();
         const result = await Native.startNativeFix();
-        logger.info("Native HDR fix launch:", result);
+        if (!result?.ok)
+            logger.error("Native HDR fix launch failed:", result);
     } catch (error) {
         logger.error("Failed to launch native HDR fix:", error);
     }
 }
 
-function setPreset(white: number, peak: number): void {
-    settings.store.sdrWhiteLevel = white;
-    settings.store.inputMaxLuminance = peak;
-    void pushNativeConfig();
-}
-
 const settings = definePluginSettings({
-    toneMapEnabled: {
+    correctionEnabled: {
         type: OptionType.BOOLEAN,
-        description: "Supply complete HDR metadata to Discord's D3D11 Video Hook renderer.",
+        description: "Enable DiscordHDRFix. Automatic mode bypasses SDR frames and corrects only frames Discord marks as HDR.",
         default: true,
+        restartNeeded: false,
+        onChange: () => void pushNativeConfig()
+    },
+    detectionMode: {
+        type: OptionType.SELECT,
+        description: "Automatic is recommended. Manual modes are only for troubleshooting a game that Discord classifies incorrectly.",
+        options: [
+            { label: "Automatic (recommended)", value: "automatic", default: true },
+            { label: "Force SDR / no tone mapping", value: "forceSdr" },
+            { label: "Force HDR10 / Rec.2020 + PQ", value: "forceHdr10" },
+            { label: "Force scRGB / Rec.709 + Linear", value: "forceScRgb" }
+        ],
         restartNeeded: false,
         onChange: () => void pushNativeConfig()
     },
     sdrWhiteLevel: {
         type: OptionType.NUMBER,
-        description: "SDR/reference white value passed to Discord's native HDR shader.",
+        description: "HDR-to-SDR reference white passed to Discord's native HDR shader. Tested baseline: 460.",
         default: 460,
         restartNeeded: false,
         onChange: () => void pushNativeConfig()
     },
     inputMaxLuminance: {
         type: OptionType.NUMBER,
-        description: "Maximum input HDR luminance passed to Discord's native HDR shader.",
+        description: "HDR input maximum luminance passed to Discord's native HDR shader. Tested baseline: 1000.",
         default: 1000,
         restartNeeded: false,
         onChange: () => void pushNativeConfig()
-    },
-    sourceColorMode: {
-        type: OptionType.SELECT,
-        description: "How Discord should interpret the Video Hook texture. Auto is recommended and fixes the common HDR10/scRGB cases.",
-        options: [
-            { label: "Auto HDR by DXGI format (recommended)", value: "autoHdr", default: true },
-            { label: "Preserve Discord source metadata", value: "preserve" },
-            { label: "Rec.709 + Linear (scRGB)", value: "rec709Linear" },
-            { label: "Rec.709 + sRGB", value: "rec709Srgb" },
-            { label: "Rec.2020 + Linear", value: "rec2020Linear" },
-            { label: "Rec.2020 + sRGB", value: "rec2020Srgb" },
-            { label: "Rec.2020 + ST.2084 / PQ", value: "rec2020St2084" }
-        ],
-        restartNeeded: false,
-        onChange: () => void pushNativeConfig()
-    },
-    verboseLogging: {
-        type: OptionType.BOOLEAN,
-        description: "Log Discord capture-option changes to DevTools.",
-        default: false,
-        restartNeeded: false
     }
 });
 
@@ -99,19 +84,14 @@ function fmt(value: unknown): string {
     return String(value);
 }
 
-function logChanged(name: string, value: unknown, previous: unknown): void {
-    if (settings.store.verboseLogging || value !== previous)
-        logger.info(`${name}:`, value);
-}
-
 function captureStatus(): string {
     return [
-        "DiscordHDRFix capture status v1.0.0",
-        "---------------------------------",
-        `Tone map enabled:                ${settings.store.toneMapEnabled}`,
+        "DiscordHDRFix capture status v1.0.1-auto-test",
+        "---------------------------------------------",
+        `Correction enabled:              ${settings.store.correctionEnabled}`,
+        `Detection mode:                  ${settings.store.detectionMode}`,
         `SDR white level:                 ${settings.store.sdrWhiteLevel}`,
         `Input max luminance:             ${settings.store.inputMaxLuminance}`,
-        `Source color mode:               ${settings.store.sourceColorMode}`,
         "",
         `Original HDR mode:               ${fmt(captureState.originalHdr)}`,
         `Effective HDR mode:              ${fmt(captureState.effectiveHdr)}`,
@@ -130,17 +110,28 @@ function captureStatus(): string {
 async function nativeStatusText(): Promise<string> {
     try {
         const result = await Native.readNativeStatus();
-        if (result == null)
-            return "DiscordHDRFix native status v1.0.0\n--------------------------------\nNo v1.0.0 native status file found yet.";
-        return `DiscordHDRFix native status v1.0.0\n--------------------------------\n${JSON.stringify(result, null, 2)}`;
+
+        if (result == null) {
+            return [
+                "DiscordHDRFix native status v1.0.1-auto-test",
+                "------------------------------------------------",
+                "No v1.0.1 status file found yet."
+            ].join("\n");
+        }
+
+        return [
+            "DiscordHDRFix native status v1.0.1-auto-test",
+            "------------------------------------------------",
+            JSON.stringify(result, null, 2)
+        ].join("\n");
     } catch (error) {
-        return `DiscordHDRFix native status v1.0.0\n--------------------------------\nFailed to read status: ${String(error)}`;
+        return `DiscordHDRFix native status v1.0.1-auto-test\n------------------------------------------------\nFailed to read status: ${String(error)}`;
     }
 }
 
 export default definePlugin({
     name: "DiscordHDRFix",
-    description: "Fixes washed-out Discord HDR Go Live streams by correcting Video Hook HDR metadata, gamut and transfer interpretation.",
+    description: "Automatically bypasses SDR frames and corrects Discord Video Hook HDR color/tone mapping.",
     authors: [{ name: "Discord HDR Fix", id: 0n }],
     tags: ["Developers", "Voice"],
     settings,
@@ -174,54 +165,36 @@ export default definePlugin({
     ],
 
     forceSdrMode(original: unknown): "never" {
-        const prevOriginal = captureState.originalHdr;
-        const prevEffective = captureState.effectiveHdr;
         captureState.patchCalls++;
         captureState.lastSeenAt = Date.now();
         captureState.originalHdr = original;
         captureState.effectiveHdr = "never";
-        logChanged("original hdrCaptureMode", original, prevOriginal);
-        logChanged("effective hdrCaptureMode", "never", prevEffective);
         return "never";
     },
 
     forceGraphicsCaptureOff(original: unknown): boolean {
-        const prevOriginal = captureState.originalGraphicsCapture;
-        const prevEffective = captureState.effectiveGraphicsCapture;
         captureState.originalGraphicsCapture = original;
         captureState.effectiveGraphicsCapture = false;
         captureState.lastSeenAt = Date.now();
-        logChanged("original useGraphicsCapture", original, prevOriginal);
-        logChanged("effective useGraphicsCapture", false, prevEffective);
         return false;
     },
 
     forceGraphicsApiOff(original: unknown): number {
-        const prevOriginal = captureState.originalGraphicsApi;
-        const prevEffective = captureState.effectiveGraphicsApi;
         captureState.originalGraphicsApi = original;
         captureState.effectiveGraphicsApi = 0;
         captureState.lastSeenAt = Date.now();
-        logChanged("original useGraphicsCaptureApiLevel", original, prevOriginal);
-        logChanged("effective useGraphicsCaptureApiLevel", 0, prevEffective);
         return 0;
     },
 
     forceVideoHookOn(original: unknown): boolean {
-        const prevOriginal = captureState.originalVideoHook;
-        const prevEffective = captureState.effectiveVideoHook;
         captureState.originalVideoHook = original;
         captureState.effectiveVideoHook = true;
         captureState.lastSeenAt = Date.now();
-        logChanged("original useVideoHook", original, prevOriginal);
-        logChanged("effective useVideoHook", true, prevEffective);
         return true;
     },
 
     toolboxActions: {
         "Apply HDR Runtime Settings": () => void pushNativeConfig(),
-        "Recommended 460 / 1000": () => setPreset(460, 1000),
-        "Reference 200 / 1000": () => setPreset(200, 1000),
         "Start Native HDR Fix": () => void startNativeFix(),
         "Show Native HDR Fix Status": () => void nativeStatusText().then(text => alert(text)),
         "Copy Combined HDR Fix Status": () => {
@@ -242,11 +215,9 @@ export default definePlugin({
         };
 
         setTimeout(() => void startNativeFix(), 1500);
-        logger.info("Started v1.0.0. Auto HDR color interpretation, HDR=never, Video Hook=true, Graphics Capture=false, Graphics API=0.");
     },
 
     stop(): void {
         delete (window as any).DiscordHDRFix;
-        logger.info("Stopped. The injected DLL remains loaded until Discord exits.");
     }
 });

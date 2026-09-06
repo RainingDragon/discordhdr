@@ -39,7 +39,7 @@ if (-not $env:LOCALAPPDATA) { Fail "LOCALAPPDATA is unavailable." }
 $InstallDir = Join-Path $env:LOCALAPPDATA "DiscordHDRFix"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-Write-Host "Installing DiscordHDRFix v1.0.0 native files..." -ForegroundColor Cyan
+Write-Host "Installing DiscordHDRFix v1.0.1-auto-test native files..." -ForegroundColor Cyan
 Copy-Item -Force $Injector (Join-Path $InstallDir "DiscordHDRFix.Injector.exe")
 Copy-Item -Force $Dll (Join-Path $InstallDir "DiscordHDRFix.Native.dll")
 
@@ -49,9 +49,9 @@ if (-not (Test-Path $ConfigPath)) {
 enabled=1
 sdr_white=460
 input_max=1000
-source_mode=1
+detection_mode=0
 "@ | Set-Content -Encoding ascii $ConfigPath
-    Write-Host "Created recommended defaults: Auto HDR, SDR white 460, input max 1000."
+    Write-Host "Created automatic HDR/SDR defaults: Automatic detection, SDR white 460, input max 1000."
 } else {
     Write-Host "Existing HDR tuning config preserved."
 }
@@ -129,7 +129,7 @@ finally {
 }
 
 Write-Host ""
-Write-Host "DiscordHDRFix v1.0.0 installed successfully." -ForegroundColor Green
+Write-Host "DiscordHDRFix v1.0.1-auto-test installed successfully." -ForegroundColor Green
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  1. Start Discord."
@@ -137,6 +137,6 @@ Write-Host "  2. Enable the DiscordHDRFix plugin in Vencord if it is not already
 Write-Host "  3. Stream an HDR game normally."
 Write-Host ""
 Write-Host "Default correction:"
-Write-Host "  Auto HDR by DXGI format"
+Write-Host "  Automatic HDR/SDR detection"
 Write-Host "  SDR white: 460"
 Write-Host "  Input max: 1000"
