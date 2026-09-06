@@ -1618,7 +1618,7 @@ void WriteStatus() {
         capacity,
         used,
         "{\n"
-        "  \"version\": \"1.2.2-stream-ui-fix\",\n"
+        "  \"version\": \"1.2.3-ui-polish\",\n"
         "  \"pid\": %lu,\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"

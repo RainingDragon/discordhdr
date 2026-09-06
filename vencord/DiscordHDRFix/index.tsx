@@ -1105,15 +1105,227 @@ function findStreamSettingsContainer():
     return candidates[0] ?? null;
 }
 
+function findTextElement(
+    root: HTMLElement,
+    terms: string[]
+): HTMLElement | null {
+    const all =
+        Array.from(
+            root.querySelectorAll<HTMLElement>("*")
+        );
+
+    for (const element of all) {
+        if (
+            element.children.length > 0
+        ) {
+            continue;
+        }
+
+        const text =
+            (element.textContent || "")
+                .trim()
+                .toLowerCase();
+
+        if (
+            terms.some(term =>
+                text === term ||
+                text.startsWith(term)
+            )
+        ) {
+            return element;
+        }
+    }
+
+    return null;
+}
+
+function closestMenuItem(
+    element: HTMLElement | null
+): HTMLElement | null {
+    if (!element)
+        return null;
+
+    return element.closest<HTMLElement>(
+        '[role="menuitem"], button, [class*="item"], [class*="Item"]'
+    );
+}
+
+function findReferenceMenuItem(
+    container: HTMLElement
+): HTMLElement | null {
+    const quality =
+        findTextElement(
+            container,
+            [
+                "stream quality",
+                "stream q",
+                "quality"
+            ]
+        );
+
+    const change =
+        findTextElement(
+            container,
+            [
+                "change stream",
+                "change window",
+                "change application"
+            ]
+        );
+
+    return (
+        closestMenuItem(quality) ??
+        closestMenuItem(change)
+    );
+}
+
 function findMenuInsertionPoint(
     container: HTMLElement
-): HTMLElement {
+): {
+    parent: HTMLElement;
+    before: ChildNode | null;
+    reference: HTMLElement | null;
+} {
+    const reference =
+        findReferenceMenuItem(
+            container
+        );
+
+    if (
+        reference &&
+        reference.parentElement
+    ) {
+        return {
+            parent:
+                reference.parentElement,
+            before:
+                reference.nextSibling,
+            reference
+        };
+    }
+
     const roleMenu =
         container.querySelector<HTMLElement>(
             '[role="menu"]'
         );
 
-    return roleMenu ?? container;
+    return {
+        parent:
+            roleMenu ?? container,
+        before: null,
+        reference: null
+    };
+}
+
+function parseAlpha(
+    color: string
+): number {
+    const rgba =
+        color.match(
+            /rgba?\(([^)]+)\)/
+        );
+
+    if (!rgba)
+        return 1;
+
+    const parts =
+        rgba[1]
+            .split(",")
+            .map(part =>
+                part.trim()
+            );
+
+    if (parts.length < 4)
+        return 1;
+
+    const alpha =
+        Number(parts[3]);
+
+    return Number.isFinite(alpha)
+        ? alpha
+        : 1;
+}
+
+function findOpaqueBackground(
+    start: HTMLElement | null
+): string {
+    let current =
+        start;
+
+    for (
+        let depth = 0;
+        current && depth < 8;
+        depth++
+    ) {
+        const background =
+            getComputedStyle(
+                current
+            ).backgroundColor;
+
+        if (
+            background &&
+            background !== "transparent" &&
+            parseAlpha(background) > .15
+        ) {
+            return background;
+        }
+
+        current =
+            current.parentElement;
+    }
+
+    return "rgb(17, 18, 20)";
+}
+
+function findReadableTextColor(
+    reference: HTMLElement | null
+): string {
+    if (reference) {
+        const color =
+            getComputedStyle(
+                reference
+            ).color;
+
+        if (
+            color &&
+            color !== "transparent"
+        ) {
+            return color;
+        }
+    }
+
+    return "rgb(219, 222, 225)";
+}
+
+function applyDiscordSurface(
+    element: HTMLElement,
+    reference: HTMLElement | null
+): void {
+    const surface =
+        findOpaqueBackground(
+            reference
+        );
+
+    const text =
+        findReadableTextColor(
+            reference
+        );
+
+    element.style.setProperty(
+        "--hdrfix-surface",
+        surface
+    );
+
+    element.style.setProperty(
+        "--hdrfix-text",
+        text
+    );
+
+    element.style.backgroundColor =
+        surface;
+
+    element.style.color =
+        text;
 }
 
 function stopDiscordMenuPropagation(
@@ -1449,6 +1661,11 @@ function openQuickFlyout(): void {
         scheduleQuickClose
     );
 
+    applyDiscordSurface(
+        flyout,
+        streamMenuRow
+    );
+
     document.body.appendChild(
         flyout
     );
@@ -1458,7 +1675,7 @@ function openQuickFlyout(): void {
     positionFloatingElement(
         flyout,
         anchor,
-        236
+        226
     );
 
     requestAnimationFrame(
@@ -1964,7 +2181,7 @@ function openEditorFlyout(): void {
         positionFloatingElement(
             editorFlyout,
             anchor,
-            382
+            348
         );
 
         return;
@@ -1998,6 +2215,11 @@ function openEditorFlyout(): void {
 
     renderEditorContents(panel);
 
+    applyDiscordSurface(
+        panel,
+        streamMenuRow
+    );
+
     document.body.appendChild(
         panel
     );
@@ -2007,7 +2229,7 @@ function openEditorFlyout(): void {
     positionFloatingElement(
         panel,
         anchor,
-        382
+        348
     );
 
     requestAnimationFrame(
@@ -2070,12 +2292,49 @@ function createStreamMenuRow(
         scheduleQuickClose
     );
 
-    const insertionPoint =
+    const insertion =
         findMenuInsertionPoint(
             container
         );
 
-    insertionPoint.appendChild(row);
+    const reference =
+        insertion.reference;
+
+    if (reference) {
+        const computed =
+            getComputedStyle(
+                reference
+            );
+
+        row.style.height =
+            computed.height &&
+            computed.height !== "auto"
+                ? computed.height
+                : "40px";
+
+        row.style.minHeight =
+            row.style.height;
+
+        row.style.maxHeight =
+            row.style.height;
+
+        row.style.marginLeft =
+            computed.marginLeft;
+
+        row.style.marginRight =
+            computed.marginRight;
+    }
+
+    if (insertion.before) {
+        insertion.parent.insertBefore(
+            row,
+            insertion.before
+        );
+    } else {
+        insertion.parent.appendChild(
+            row
+        );
+    }
 
     return row;
 }
@@ -2145,7 +2404,7 @@ function refreshStreamMenuUi(): void {
             editorFlyout,
             streamMenuRow
                 .getBoundingClientRect(),
-            382
+            348
         );
     }
 }
@@ -2191,7 +2450,7 @@ function combinedStatus(): string {
             : null;
 
     return [
-        "DiscordHDRFix v1.2.2 stream UI fix",
+        "DiscordHDRFix v1.2.3 UI polish",
         "----------------------------------------",
         `Active stream:                 ${activeStream?.displayName ?? "<none>"}`,
         `Active executable:             ${activeStream?.exeName ?? "<unresolved>"}`,

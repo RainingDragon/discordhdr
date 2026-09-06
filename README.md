@@ -1,39 +1,44 @@
-# DiscordHDRFix v1.2.2 — Stream UI Fix
+# DiscordHDRFix v1.2.3 — Stream UI Polish
 
-v1.2.1 could hide the Discord HDR Fix row entirely when the runtime
-MediaEngine source hook did not receive the active Go Live source.
+This revision fixes the layout/styling problems visible in v1.2.2.
 
-v1.2.2 fixes that in two ways:
+## Fixes
 
-1. Restores the proven webpack `setGoLiveSource()` / `clearDesktopSource()`
-   commit hooks from v1.2.0.
-2. Keeps the v1.2.1 runtime MediaEngine hook as a second fallback.
+### Compact stream-menu row
 
-The Discord HDR Fix row now appears whenever the active stream menu is detected,
-even while application identity is still resolving.
+The Discord HDR Fix button is now hard-limited to a single 40 px menu row.
 
-If source resolution has not happened yet, the row displays:
+Instead of appending into an arbitrary popout container, the plugin now finds
+Discord's existing `Stream Quality` / `Change Stream` item and inserts the HDR
+Fix row beside those real menu items.
+
+This prevents the button from stretching over or covering the rest of the Go
+Live menu.
+
+### Opaque flyouts
+
+The hover quick menu and click editor no longer depend only on Discord CSS
+variables after being moved under `document.body`.
+
+At runtime the plugin copies the actual computed background and text color from
+Discord's existing stream menu and applies those values directly to the HDR Fix
+flyouts.
+
+Fallbacks are also explicitly opaque:
 
 ```text
-Discord HDR Fix
-Detecting active stream…
+surface: #111214
+text:    #dbdee1
+muted:   #949ba4
 ```
 
-Hover/click remains usable and shows a nonblocking diagnostic state instead of
-silently omitting the feature.
+so a missing/transparent Discord variable cannot produce a transparent editor
+or black-on-black text.
 
-Status now also reports:
+### Smaller full editor
 
-```text
-Candidate sources cached
-Runtime connections hooked
-```
+The click editor is reduced to 348 px wide and stays non-modal. It still closes
+on outside click and does not install a blocking backdrop.
 
-All v1.2.1 behavior remains:
-
-- Discord-themed hover quick menu
-- click-to-open non-modal editor
-- outside-click dismiss
-- per-app profile manager in plugin settings
-- customizable RenoDX / ReShade profiles
-- HWND -> PID executable resolution
+All existing per-app, Automatic, RenoDX/ReShade and plugin-settings behavior is
+unchanged.

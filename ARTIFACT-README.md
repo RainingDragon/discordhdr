@@ -1,18 +1,22 @@
-# DiscordHDRFix v1.2.2 Stream UI Fix
+# DiscordHDRFix v1.2.3 UI Polish
 
-Install normally, then stream an application and open Discord's Go Live menu.
+This build specifically fixes:
 
-You should now always see:
+- HDR Fix button covering the Go Live menu
+- black/dark text on dark Discord surfaces
+- transparent hover/full-editor flyouts
+- oversized full editor
+
+Expected UX:
 
 ```text
-Discord HDR Fix  >
+Stop Streaming
+Change Stream
+Stream Quality
+Discord HDR Fix   >
+Share Stream Audio
+Report Problem
 ```
 
-If Discord has not yet reported the selected source it will temporarily say:
-
-```text
-Detecting active stream…
-```
-
-This build uses both the v1.2.0 direct Go Live source hook and the v1.2.1 runtime
-MediaEngine hook, so the row no longer depends on only one source-detection path.
+Hover `Discord HDR Fix` for quick presets.
+Click it for the 348 px non-modal advanced editor.

@@ -126,7 +126,7 @@ finally {
 }
 
 Write-Host ""
-Write-Host "DiscordHDRFix v1.2.2 stream UI fix installed." -ForegroundColor Green
+Write-Host "DiscordHDRFix v1.2.3 UI polish installed." -ForegroundColor Green
 Write-Host "Start Discord and enable the DiscordHDRFix plugin."
 Write-Host ""
 Write-Host "Default mode is Observe only."
