@@ -1,0 +1,487 @@
+.vc-hdrfix-stream-row {
+    width: calc(100% - 12px);
+    min-height: 42px;
+    margin: 2px 6px;
+    padding: 7px 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--interactive-normal);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        background-color 120ms ease,
+        color 120ms ease,
+        transform 120ms ease;
+}
+
+.vc-hdrfix-stream-row:hover,
+.vc-hdrfix-stream-row:focus-visible {
+    background: var(--background-modifier-hover);
+    color: var(--interactive-hover);
+    outline: none;
+}
+
+.vc-hdrfix-stream-row:active {
+    background: var(--background-modifier-active);
+    transform: scale(.99);
+}
+
+.vc-hdrfix-row-icon,
+.vc-hdrfix-row-chevron {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vc-hdrfix-row-icon {
+    width: 20px;
+    height: 20px;
+}
+
+.vc-hdrfix-row-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.vc-hdrfix-row-chevron {
+    width: 18px;
+    height: 18px;
+    color: var(--interactive-normal);
+}
+
+.vc-hdrfix-row-chevron svg {
+    width: 16px;
+    height: 16px;
+}
+
+.vc-hdrfix-row-copy {
+    min-width: 0;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.vc-hdrfix-row-label {
+    color: var(--text-normal);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 18px;
+}
+
+.vc-hdrfix-row-value {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-hdrfix-flyout {
+    position: fixed;
+    z-index: 100000;
+    box-sizing: border-box;
+    color: var(--text-normal);
+    background:
+        var(--background-floating, var(--background-secondary));
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 8px;
+    box-shadow: var(--elevation-high);
+    opacity: 0;
+    transform: translateX(-4px) scale(.985);
+    transform-origin: top left;
+    pointer-events: auto;
+    transition:
+        opacity 120ms cubic-bezier(.2, 0, 0, 1),
+        transform 140ms cubic-bezier(.2, 0, 0, 1);
+}
+
+.vc-hdrfix-flyout.vc-hdrfix-open {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+}
+
+.vc-hdrfix-flyout.vc-hdrfix-closing {
+    opacity: 0;
+    transform: translateX(-3px) scale(.99);
+    pointer-events: none;
+}
+
+.vc-hdrfix-quick {
+    width: 236px;
+    padding: 6px;
+}
+
+.vc-hdrfix-flyout-header {
+    padding: 7px 9px 5px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-hdrfix-menu-option {
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 9px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--interactive-normal);
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        background-color 100ms ease,
+        color 100ms ease;
+}
+
+.vc-hdrfix-menu-option:hover,
+.vc-hdrfix-menu-option:focus-visible {
+    background: var(--brand-500);
+    color: white;
+    outline: none;
+}
+
+.vc-hdrfix-menu-option[data-selected="true"] {
+    color: var(--text-normal);
+    font-weight: 500;
+}
+
+.vc-hdrfix-menu-option[data-selected="true"]:hover {
+    color: white;
+}
+
+.vc-hdrfix-check {
+    font-size: 15px;
+    line-height: 1;
+}
+
+.vc-hdrfix-quick-footer {
+    margin-top: 5px;
+    padding: 7px 9px 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-top: 1px solid var(--background-modifier-accent);
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 13px;
+}
+
+.vc-hdrfix-editor {
+    width: 382px;
+    max-height: min(680px, calc(100vh - 24px));
+    padding: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+
+.vc-hdrfix-editor::-webkit-scrollbar {
+    width: 8px;
+}
+
+.vc-hdrfix-editor::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thin-thumb);
+    border-radius: 8px;
+}
+
+.vc-hdrfix-editor-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 14px 14px 11px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    background:
+        var(--background-floating, var(--background-secondary));
+    border-bottom: 1px solid var(--background-modifier-accent);
+}
+
+.vc-hdrfix-editor-title-wrap {
+    min-width: 0;
+}
+
+.vc-hdrfix-editor-title {
+    color: var(--header-primary);
+    font-size: 16px;
+    line-height: 20px;
+    font-weight: 600;
+}
+
+.vc-hdrfix-editor-subtitle {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-hdrfix-close-button {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--interactive-normal);
+    font: inherit;
+    font-size: 23px;
+    line-height: 24px;
+    cursor: pointer;
+    transition:
+        background-color 100ms ease,
+        color 100ms ease;
+}
+
+.vc-hdrfix-close-button:hover {
+    background: var(--background-modifier-hover);
+    color: var(--interactive-hover);
+}
+
+.vc-hdrfix-status-card {
+    margin: 12px 12px 3px;
+    padding: 9px 10px;
+    display: grid;
+    gap: 6px;
+    border-radius: 6px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-accent);
+}
+
+.vc-hdrfix-status-card > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.vc-hdrfix-status-card span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.vc-hdrfix-status-card b {
+    max-width: 235px;
+    color: var(--text-normal);
+    font-size: 11px;
+    font-weight: 500;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vc-hdrfix-editor-section {
+    margin: 13px 12px 0;
+}
+
+.vc-hdrfix-section-label {
+    margin: 0 0 7px 1px;
+    color: var(--header-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+}
+
+.vc-hdrfix-choice-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.vc-hdrfix-choice {
+    min-height: 30px;
+    padding: 5px 9px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 5px;
+    background: var(--background-secondary);
+    color: var(--interactive-normal);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition:
+        background-color 100ms ease,
+        border-color 100ms ease,
+        color 100ms ease,
+        transform 100ms ease;
+}
+
+.vc-hdrfix-choice:hover {
+    background: var(--background-modifier-hover);
+    color: var(--interactive-hover);
+}
+
+.vc-hdrfix-choice:active {
+    transform: scale(.98);
+}
+
+.vc-hdrfix-choice[data-selected="true"] {
+    background: var(--brand-500);
+    border-color: var(--brand-500);
+    color: white;
+}
+
+.vc-hdrfix-helper-text,
+.vc-hdrfix-preset-summary {
+    margin: 10px 12px 0;
+    padding: 8px 10px;
+    border-radius: 5px;
+    color: var(--text-muted);
+    background: var(--background-secondary);
+    font-size: 11px;
+    line-height: 15px;
+}
+
+.vc-hdrfix-number-grid {
+    margin: 13px 12px 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.vc-hdrfix-number-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: var(--header-secondary);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.vc-hdrfix-number-field input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 34px;
+    padding: 7px 9px;
+    border: 1px solid var(--background-modifier-accent);
+    border-radius: 4px;
+    outline: none;
+    background: var(--input-background);
+    color: var(--text-normal);
+    font: inherit;
+    font-size: 13px;
+    transition:
+        border-color 120ms ease,
+        box-shadow 120ms ease;
+}
+
+.vc-hdrfix-number-field input:focus {
+    border-color: var(--brand-500);
+    box-shadow: 0 0 0 1px var(--brand-500);
+}
+
+.vc-hdrfix-editor-footer {
+    margin: 14px 12px 12px;
+    padding-top: 11px;
+    border-top: 1px solid var(--background-modifier-accent);
+}
+
+.vc-hdrfix-secondary-button {
+    width: 100%;
+    min-height: 34px;
+    border: 0;
+    border-radius: 4px;
+    background: var(--button-secondary-background);
+    color: var(--text-normal);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+        background-color 100ms ease,
+        transform 100ms ease;
+}
+
+.vc-hdrfix-secondary-button:hover {
+    background: var(--button-secondary-background-hover);
+}
+
+.vc-hdrfix-secondary-button:active {
+    transform: scale(.99);
+}
+
+.vc-hdrfix-settings {
+    margin-top: 20px;
+}
+
+.vc-hdrfix-settings-empty,
+.vc-hdrfix-settings-card {
+    margin-top: 10px;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-accent);
+    color: var(--text-normal);
+}
+
+.vc-hdrfix-settings-label {
+    margin-top: 14px !important;
+    margin-bottom: 6px !important;
+}
+
+.vc-hdrfix-settings-app {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.vc-hdrfix-settings-app strong {
+    color: var(--header-primary);
+}
+
+.vc-hdrfix-settings-app span {
+    color: var(--text-muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.vc-hdrfix-settings-advanced {
+    margin-top: 14px;
+    padding-top: 2px;
+    border-top: 1px solid var(--background-modifier-accent);
+}
+
+.vc-hdrfix-settings-numbers {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.vc-hdrfix-settings-numbers label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--header-secondary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.vc-hdrfix-settings-actions {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}

@@ -1,27 +1,22 @@
-DiscordHDRFix v1.2.0 PER-APPLICATION PROFILES
-===============================================
+DiscordHDRFix v1.2.1 DISCORD-STYLE UI
+=========================================
 
-Every newly streamed application starts Automatic.
+New stream-menu UX:
 
-DiscordHDRFix logs ONLY applications you actually stream, not every application
-Discord shows in the picker.
+  HOVER Discord HDR Fix
+    -> quick profile flyout
 
-Automatic:
-  format 28 -> SDR
-  format 24 -> Native HDR10 (460 / 1000)
-  format 10 -> scRGB (460 / 1000)
-  unknown   -> preserve / observe
+  CLICK Discord HDR Fix
+    -> full non-modal per-app editor
 
-Per-app profiles:
-  Automatic
-  SDR
-  Native HDR10
-  scRGB
-  RenoDX / ReShade
-  Custom
+  CLICK ELSEWHERE IN DISCORD
+    -> editor closes
 
-While streaming, open Discord's normal Stream Settings / Change Windows popout.
-A Discord HDR Fix section should appear there.
+No browser-native white <select> dropdowns are used in the stream menu.
 
-Profiles:
-  %LOCALAPPDATA%\DiscordHDRFix\profiles.json
+RenoDX / ReShade is now customizable per application.
+
+Vencord -> Plugins -> DiscordHDRFix also contains a full per-app profile manager.
+
+Stream identity now accepts window:<HWND> source ids without requiring a second
+colon, so profiles should resolve to real executables instead of raw window IDs.

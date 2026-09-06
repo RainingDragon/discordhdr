@@ -1618,7 +1618,7 @@ void WriteStatus() {
         capacity,
         used,
         "{\n"
-        "  \"version\": \"1.2.0-per-app-profiles\",\n"
+        "  \"version\": \"1.2.1-discord-ui\",\n"
         "  \"pid\": %lu,\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"

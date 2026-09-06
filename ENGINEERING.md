@@ -146,3 +146,40 @@ desktopDescription.id (window:<HWND>:...) -> GetWindowThreadProcessId -> executa
 ### Stream controls
 
 The Vencord side mounts a small DOM control panel into Discord's visible stream-settings/change-window popout. The panel changes the active application's profile and rewrites the stable native host config live. The native renderer host remains process-global but receives only the currently active application's resolved settings.
+
+
+## v1.2.1 UI architecture
+
+The old embedded panel used raw native HTML `<select>` elements. Those inherit
+Chromium/OS dropdown surfaces rather than Discord's floating menu surfaces,
+which caused light/white option popouts and poor dark-theme contrast.
+
+v1.2.1 changes the active-stream UI to:
+
+```text
+Discord stream menu
+  -> one injected menu-like row
+     -> hover: fixed-position quick flyout
+     -> click: fixed-position non-modal editor
+```
+
+The editor has no backdrop and installs only a document-level outside-pointer
+dismiss listener. It therefore does not intercept unrelated Discord UI.
+
+Both flyouts use Discord CSS variables such as:
+
+```text
+--background-floating
+--background-secondary
+--background-modifier-hover
+--text-normal
+--text-muted
+--interactive-normal
+--brand-500
+--elevation-high
+```
+
+Opening/closing uses 120-140 ms opacity/scale/translation transitions.
+
+The Vencord plugin settings use Discord/Vencord React components (`Select`,
+`TextInput`, `Button`, `Forms`) through `@webpack/common`.

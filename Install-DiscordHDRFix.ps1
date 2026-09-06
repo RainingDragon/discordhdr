@@ -126,7 +126,7 @@ finally {
 }
 
 Write-Host ""
-Write-Host "DiscordHDRFix v1.2.0 per-application profile host installed." -ForegroundColor Green
+Write-Host "DiscordHDRFix v1.2.1 Discord-style per-app UI installed." -ForegroundColor Green
 Write-Host "Start Discord and enable the DiscordHDRFix plugin."
 Write-Host ""
 Write-Host "Default mode is Observe only."

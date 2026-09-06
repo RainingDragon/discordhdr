@@ -1,35 +1,21 @@
-# DiscordHDRFix v1.2.0 Per-App Profiles
+# DiscordHDRFix v1.2.1 Discord UI
 
-## Install
-
-Fully exit Discord:
+Install as usual with Discord fully closed:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\Install-DiscordHDRFix.ps1
 ```
 
-Then start Discord and enable `DiscordHDRFix`.
+## Test
 
-## Normal use
+1. Start Discord and stream an application.
+2. Open Discord's normal Go Live stream menu.
+3. You should see a single `Discord HDR Fix` row rather than a large embedded form.
+4. Hover it for quick profile selection.
+5. Click it for the full non-modal per-app editor.
+6. Click elsewhere in Discord; the full editor should close.
+7. Open Vencord -> Plugins -> DiscordHDRFix settings to edit profiles there too.
 
-Do nothing. Every application starts in **Automatic** mode.
-
-DiscordHDRFix logs only applications you actually stream.
-
-## Override one application
-
-While streaming, open Discord's normal Stream Settings / Change Windows popout. A **Discord HDR Fix** section should appear with:
-
-```text
-Automatic
-SDR
-Native HDR10
-scRGB
-RenoDX / ReShade
-Custom
-```
-
-The choice is saved only for the current application and applies live.
-
-For Dawnwalker/RenoDX, use `RenoDX / ReShade` as the starting profile. It uses the current near-match of Rec.2020 + sRGB + injected metadata at 360 / 200 without changing the native-HDR 460 / 1000 baseline for other games.
+RenoDX / ReShade is customizable per application. Its 360 / 200 starting values
+do not affect native HDR profiles.

@@ -155,7 +155,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $resolvedPid = ${pid}
 $sourceId = ${psSingleQuote(id)}
 
-if (($resolvedPid -le 0) -and ($sourceId -match '^window:([^:]+):')) {
+if (($resolvedPid -le 0) -and ($sourceId -match '^window:([^:]+)(?::|$)')) {
     $rawHandle = $matches[1]
     Add-Type -TypeDefinition @'
 using System;
