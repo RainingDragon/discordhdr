@@ -6,8 +6,9 @@ import { join } from "path";
 
 function installDir(): string {
     const localAppData = process.env.LOCALAPPDATA;
+
     if (!localAppData)
-        throw new Error("LOCALAPPDATA is not available.");
+        throw new Error("LOCALAPPDATA is unavailable.");
 
     return join(localAppData, "DiscordHDRFix");
 }
@@ -21,16 +22,7 @@ function nativeDllPath(): string {
 }
 
 function configPath(): string {
-    return join(installDir(), "tone-map.cfg");
-}
-
-function detectionModeNumber(mode: string): number {
-    switch (mode) {
-        case "forceSdr": return 1;
-        case "forceHdr10": return 2;
-        case "forceScRgb": return 3;
-        default: return 0;
-    }
+    return join(installDir(), "host.cfg");
 }
 
 async function checkNativeFiles() {
@@ -57,12 +49,14 @@ export async function nativeFilesPresent(_event: Electron.IpcMainInvokeEvent) {
     return checkNativeFiles();
 }
 
-export async function writeToneMapConfig(
+export async function writeHostConfig(
     _event: Electron.IpcMainInvokeEvent,
     enabled: boolean,
+    traceEnabled: boolean,
+    hostMode: string,
     sdrWhiteLevel: number,
     inputMaxLuminance: number,
-    detectionMode: string
+    rules: string
 ) {
     await mkdir(installDir(), { recursive: true });
 
@@ -76,13 +70,28 @@ export async function writeToneMapConfig(
         Math.max(100, Number(inputMaxLuminance) || 1000)
     );
 
-    const mode = detectionModeNumber(detectionMode);
+    const safeMode = [
+        "observe",
+        "rules",
+        "force_sdr",
+        "force_hdr10",
+        "force_scrgb",
+        "metadata_only"
+    ].includes(hostMode)
+        ? hostMode
+        : "observe";
+
+    const safeRules = String(rules ?? "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
 
     const text = [
         `enabled=${enabled ? 1 : 0}`,
+        `trace=${traceEnabled ? 1 : 0}`,
+        `mode=${safeMode}`,
         `sdr_white=${white}`,
         `input_max=${peak}`,
-        `detection_mode=${mode}`,
+        `rules=${safeRules}`,
         ""
     ].join("\n");
 
@@ -96,10 +105,11 @@ export async function writeToneMapConfig(
         ok: true,
         path: finalPath,
         enabled,
+        traceEnabled,
+        hostMode: safeMode,
         sdrWhiteLevel: white,
         inputMaxLuminance: peak,
-        detectionMode,
-        detectionModeNumber: mode
+        rules: safeRules
     };
 }
 
@@ -137,7 +147,7 @@ export async function readNativeStatus(_event: Electron.IpcMainInvokeEvent) {
     const dir = tmpdir();
 
     const names = (await readdir(dir))
-        .filter(name => /^DiscordHDRFix-v101-\d+\.json$/i.test(name));
+        .filter(name => /^DiscordHDRFix-devhost-\d+\.json$/i.test(name));
 
     if (names.length === 0)
         return null;
@@ -146,6 +156,7 @@ export async function readNativeStatus(_event: Electron.IpcMainInvokeEvent) {
         names.map(async name => {
             const path = join(dir, name);
             const info = await stat(path);
+
             return {
                 name,
                 path,

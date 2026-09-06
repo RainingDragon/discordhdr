@@ -1,116 +1,95 @@
-# DiscordHDRFix v1.0.1 — Automatic HDR/SDR Detection Test
+# DiscordHDRFix v1.1.0 — Hot-Reload Dev Host
 
-This is the test build for the last major behavior needed before a final
-brother-ready release: **automatic SDR bypass and HDR correction**.
+This replaces the one-build-per-experiment workflow.
 
-## What changed
-
-The exact analyzed Windows `discord_voice.node` exposes a boolean field:
+The DLL installs one stable detour on Discord's shared renderer and then polls:
 
 ```text
-WumpusFrame::is_source_hdr
-offset: +0x1da
+%LOCALAPPDATA%\DiscordHDRFix\host.cfg
 ```
 
-At the Video Hook renderer callsite the frame pointer is still in `r12`, so the
-native relay can classify every frame without looking at image content and
-without assuming that a 10-bit texture is necessarily HDR.
+every ~250 ms.
 
-Automatic policy:
+Changing Vencord settings rewrites that file atomically. The native host applies
+the new behavior immediately; no Discord restart, stream restart, C++ rebuild,
+or GitHub Actions run is required for normal HDR/SDR experiments.
 
-```text
-is_source_hdr = false
-  -> leave Discord's SDR path alone
-  -> NO HDR metadata injection
-  -> NO gamut/transfer override
+## What is built into the host
 
-is_source_hdr = true
-  + R10G10B10A2_UNORM
-  -> Rec.2020 + ST.2084/PQ
-  -> inject HDR metadata (default 460 / 1000)
+### Shared-renderer tracer
 
-is_source_hdr = true
-  + R16G16B16A16_FLOAT
-  -> Rec.709 + Linear/scRGB
-  -> inject HDR metadata
+The host records recent caller RVAs plus:
 
-is_source_hdr = true
-  + unknown format
-  -> preserve Discord's source color enums
-  -> inject the missing HDR metadata
-```
+- source DXGI format
+- original primaries
+- original transfer
+- original HDR-metadata pointer null/non-null
+- selected action
 
-## Why this is a test build
+This covers the v1.0.2 path-tracing goal.
 
-We have proven the two individual behaviors visually:
+### Live actions
 
-- Native HDR: Rec.2020 + PQ + metadata looks substantially correct.
-- SDR: disabling HDR metadata injection fixes the darker/gray SDR stream.
-
-This build tests whether Discord's `WumpusFrame::is_source_hdr` byte reliably
-distinguishes those two cases in Video Hook.
-
-## Test 1 — native HDR game
-
-Settings:
+Runtime modes:
 
 ```text
-Correction enabled: ON
-Detection mode: Automatic
-SDR white: 460
-Input max: 1000
-```
-
-Expected native status:
-
-```text
-last_source_is_hdr: true
-last_decision: hdr10_rec2020_pq    (for a 10-bit HDR10 game)
-hdr_frames_corrected: increasing
-hdr_metadata_injected: increasing
-```
-
-The image should look like the working manual Rec.2020 + PQ result.
-
-## Test 2 — Slay the Spire 2, Windows AutoHDR OFF
-
-Use the same Automatic settings.
-
-Expected native status:
-
-```text
-last_source_is_hdr: false
-last_decision: sdr_bypass
-sdr_frames_bypassed: increasing
-```
-
-`hdr_metadata_injected` should stop increasing while only that SDR stream is
-being rendered.
-
-The stream should look like the previously successful manual combination:
-tone mapping OFF + preserve source metadata.
-
-## Manual escape hatches
-
-The Vencord setting still offers:
-
-```text
-Automatic
-Force SDR / no tone mapping
+Observe only
+Caller rules
+Force SDR / preserve
 Force HDR10 / Rec.2020 + PQ
 Force scRGB / Rec.709 + Linear
+Metadata only
 ```
 
-These are diagnostic overrides, not intended for normal use.
+HDR metadata uses the live `SDR white` and `Input max` settings.
 
-## Target build
+### Live caller rules
 
-Exact `discord_voice.node` SHA-256:
+Rule syntax:
 
 ```text
-54d452eefb5bd20f022dca1f93e3a92cf641e14283761720e4276f3fb0585db9
+callerRva,format|any,metadata(any|null|nonnull),action
 ```
 
-The patch also verifies the Video Hook register setup, renderer callsite, and an
-independent machine-code read of `[WumpusFrame + 0x1da]`. It fails closed if
-those signatures change.
+Actions:
+
+```text
+preserve
+sdr
+hdr10
+scrgb
+metadata
+```
+
+Separate rules with semicolons.
+
+Example:
+
+```text
+0x3fd467,24,null,hdr10;0x4abcde,any,any,preserve
+```
+
+The host restores temporary primaries/transfer changes immediately after
+Discord's renderer returns.
+
+## Safety changes
+
+Unlike the v1.0.1 caller-specific relay:
+
+- no WumpusFrame register assumption
+- shared renderer ABI only
+- source reads/writes guarded with SEH
+- unknown Discord build fails closed
+- Observe mode is the default
+
+## When another native rebuild is still required
+
+Only if:
+
+- Discord updates `discord_voice.node`
+- the renderer ABI changes
+- we need a fundamentally new hook point
+- we need a new kind of native observation/action
+
+Normal caller matching, tracing, HDR10/scRGB selection, metadata injection,
+white/peak tuning, and bypass rules are all hot-swappable.

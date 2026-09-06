@@ -1,148 +1,152 @@
 #include <windows.h>
+#include <intrin.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdarg>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
 
+#pragma intrinsic(_ReturnAddress)
 
-// Exact analyzed Windows discord_voice.node supplied by the tester.
-// SHA-256:
-// 54d452eefb5bd20f022dca1f93e3a92cf641e14283761720e4276f3fb0585db9
 constexpr DWORD kExpectedTimeDateStamp = 0x6a95b8a4;
 constexpr DWORD kExpectedSizeOfImage = 0x00fd8000;
-
-constexpr std::uintptr_t kVideoHookFrameSaveRva = 0x003fcdca;
-constexpr std::uintptr_t kVideoHookNullMetadataRva = 0x003fd443;
-constexpr std::uintptr_t kVideoHookRendererCallRva = 0x003fd462;
-constexpr std::uintptr_t kVideoHookReturnRva = 0x003fd467;
 constexpr std::uintptr_t kRendererWrapperRva = 0x0052cad0;
+constexpr std::size_t kPatchedPrologueSize = 16;
 
-// Independent use of the same WumpusFrame::is_source_hdr byte elsewhere in
-// discord_voice.node. We verify this instruction before patching so an update
-// cannot silently change the layout we depend on.
-constexpr std::uintptr_t kIndependentIsSourceHdrReadRva = 0x005ddaa1;
-
-// At the Video Hook renderer callsite:
-//   r12 = WumpusFrame*
-//   byte [r12 + 0x1da] = WumpusFrame::is_source_hdr
-constexpr std::size_t kWumpusIsSourceHdrOffset = 0x1da;
-
-// Renderer source descriptor fields:
-//   +0x178 = DXGI_FORMAT (u32)
-//   +0x17c = primaries/gamut enum
-//   +0x17d = transfer-function enum
 constexpr std::size_t kSourceFormatOffset = 0x178;
 constexpr std::size_t kSourcePrimariesOffset = 0x17c;
 constexpr std::size_t kSourceTransferOffset = 0x17d;
 
+constexpr std::size_t kTraceCapacity = 4096;
+constexpr std::size_t kMaxRules = 32;
+
 constexpr std::uint32_t kDxgiR16G16B16A16Float = 10;
 constexpr std::uint32_t kDxgiR10G10B10A2Unorm = 24;
 
+enum class HostMode : int {
+    Observe = 0,
+    Rules = 1,
+    ForceSdr = 2,
+    ForceHdr10 = 3,
+    ForceScRgb = 4,
+    MetadataOnly = 5
+};
+
+enum class Action : int {
+    Preserve = 0,
+    Sdr = 1,
+    Hdr10 = 2,
+    ScRgb = 3,
+    MetadataOnly = 4
+};
+
+enum class MetadataMatch : int {
+    Any = 0,
+    Null = 1,
+    NonNull = 2
+};
+
 struct HdrMetadata {
-    float sdrWhiteLevel;       // +0x00
-    float inputMaxLuminance;   // +0x04
-    std::uint8_t state;        // +0x08; 1 = valid HDR metadata
+    float sdrWhiteLevel;
+    float inputMaxLuminance;
+    std::uint8_t state;
     std::uint8_t padding[3];
 };
 
 static_assert(sizeof(HdrMetadata) == 12);
-static_assert(offsetof(HdrMetadata, state) == 8);
 
-enum class DetectionMode : LONG {
-    Automatic = 0,
-    ForceSdr = 1,
-    ForceHdr10 = 2,
-    ForceScRgb = 3
+struct Rule {
+    std::uintptr_t callerRva = 0;
+    int format = -1; // -1 = wildcard
+    MetadataMatch metadataMatch = MetadataMatch::Any;
+    Action action = Action::Preserve;
 };
 
-enum class Decision : LONG {
-    DisabledBypass = 0,
-    SdrBypass = 1,
-    Hdr10 = 2,
-    ScRgb = 3,
-    HdrUnknownFormat = 4
-};
-
-struct Config {
+struct RuntimeConfig {
+    unsigned generation = 1;
     bool enabled = true;
-    float white = 460.0f;
-    float peak = 1000.0f;
-    DetectionMode detectionMode = DetectionMode::Automatic;
+    bool traceEnabled = true;
+    HostMode mode = HostMode::Observe;
+    float sdrWhite = 460.0f;
+    float inputMax = 1000.0f;
+    std::size_t ruleCount = 0;
+    Rule rules[kMaxRules]{};
 };
 
-// These symbols are intentionally C linkage because probe/relay.asm references
-// them directly. LONG/LONG64 are naturally aligned globals on x64.
-extern "C" {
+struct TraceEvent {
+    volatile LONG64 sequence;
+    volatile LONG64 callerRva;
+    volatile LONG64 sourcePointer;
+    volatile LONG64 originalMetadataPointer;
+    volatile LONG format;
+    volatile LONG originalPrimaries;
+    volatile LONG originalTransfer;
+    volatile LONG effectivePrimaries;
+    volatile LONG effectiveTransfer;
+    volatile LONG action;
+    volatile LONG sourceReadable;
+};
 
-volatile LONG g_DH_RuntimeEnabled = 1;
-volatile LONG g_DH_DetectionMode = static_cast<LONG>(DetectionMode::Automatic);
+struct CallerBucket {
+    std::uintptr_t callerRva = 0;
+    unsigned long long count = 0;
+    unsigned long long metadataNull = 0;
+    unsigned long long metadataNonNull = 0;
+    unsigned long long sourceUnreadable = 0;
+    LONG lastFormat = -1;
+    LONG lastPrimaries = -1;
+    LONG lastTransfer = -1;
+    LONG lastAction = 0;
+};
 
-void* volatile g_DH_ActiveMetadataPtr = nullptr;
-void* volatile g_DH_OriginalRenderer = nullptr;
+using RendererFn = void* (__fastcall*)(
+    void*, void*, void*, void*,
+    void*, void*, void*, void*, void*
+);
 
-volatile LONG64 g_DH_RendererCalls = 0;
-volatile LONG64 g_DH_DisabledBypassFrames = 0;
-volatile LONG64 g_DH_SdrFramesBypassed = 0;
-volatile LONG64 g_DH_HdrFramesCorrected = 0;
-volatile LONG64 g_DH_Hdr10Frames = 0;
-volatile LONG64 g_DH_ScRgbFrames = 0;
-volatile LONG64 g_DH_HdrUnknownFormatFrames = 0;
-volatile LONG64 g_DH_MetadataInjected = 0;
-volatile LONG64 g_DH_SourceColorOverrides = 0;
-
-volatile LONG g_DH_LastSourceIsHdr = -1;
-volatile LONG g_DH_LastSourceFormat = -1;
-volatile LONG g_DH_LastOriginalPrimaries = -1;
-volatile LONG g_DH_LastOriginalTransfer = -1;
-volatile LONG g_DH_LastEffectivePrimaries = -1;
-volatile LONG g_DH_LastEffectiveTransfer = -1;
-volatile LONG g_DH_LastDecision = -1;
-volatile LONG g_DH_LastOriginalHdrMetadataNull = -1;
-
-void DiscordHDRFixRelay();
-
-} // extern "C"
+std::atomic<const RuntimeConfig*> g_activeConfig{nullptr};
 
 alignas(16) HdrMetadata g_metadataRing[256]{};
-volatile LONG g_metadataWriteIndex = 0;
+volatile LONG g_metadataIndex = 0;
+
+alignas(64) TraceEvent g_trace[kTraceCapacity]{};
+volatile LONG64 g_traceWriteIndex = 0;
 
 volatile LONG g_hookInstalled = 0;
-volatile LONG g_whiteBits = 0;
-volatile LONG g_peakBits = 0;
+volatile LONG64 g_totalRendererCalls = 0;
+volatile LONG64 g_totalModifiedCalls = 0;
+volatile LONG64 g_totalMetadataInjected = 0;
+volatile LONG64 g_totalSourceOverrides = 0;
 
-std::uint8_t* g_nearRelay = nullptr;
+volatile LONG64 g_lastCallerRva = 0;
+volatile LONG g_lastFormat = -1;
+volatile LONG g_lastOriginalPrimaries = -1;
+volatile LONG g_lastOriginalTransfer = -1;
+volatile LONG g_lastEffectivePrimaries = -1;
+volatile LONG g_lastEffectiveTransfer = -1;
+volatile LONG g_lastAction = 0;
+volatile LONG g_lastSourceReadable = 0;
+volatile LONG g_lastMetadataWasNull = -1;
+
+HMODULE g_voiceModule = nullptr;
+std::uintptr_t g_voiceBase = 0;
+std::size_t g_voiceSize = 0;
+
+std::uint8_t* g_trampoline = nullptr;
+RendererFn g_originalRenderer = nullptr;
+std::uint8_t g_originalPrologue[kPatchedPrologueSize]{};
 
 wchar_t g_statusPath[MAX_PATH]{};
 wchar_t g_configPath[MAX_PATH]{};
 char g_signature[192] = "waiting for discord_voice.node";
 char g_error[512]{};
-
-std::uint32_t FloatBits(float v) {
-    std::uint32_t bits = 0;
-    std::memcpy(&bits, &v, sizeof(bits));
-    return bits;
-}
-
-float BitsFloat(std::uint32_t bits) {
-    float v = 0.0f;
-    std::memcpy(&v, &bits, sizeof(v));
-    return v;
-}
-
-void StoreFloatBits(volatile LONG* target, float value) {
-    InterlockedExchange(target, static_cast<LONG>(FloatBits(value)));
-}
-
-float LoadFloatBits(volatile LONG* source, float fallback) {
-    const auto bits = static_cast<std::uint32_t>(
-        InterlockedCompareExchange(source, 0, 0)
-    );
-    const float value = BitsFloat(bits);
-    return value > 0.0f ? value : fallback;
-}
+char g_configError[512]{};
 
 void SetSignature(const char* text) {
     strncpy_s(g_signature, text ? text : "", _TRUNCATE);
@@ -152,14 +156,30 @@ void SetError(const char* text) {
     strncpy_s(g_error, text ? text : "", _TRUNCATE);
 }
 
-const char* FormatName(LONG format) {
-    switch (format) {
-    case 10: return "R16G16B16A16_FLOAT";
-    case 24: return "R10G10B10A2_UNORM";
-    case 29: return "R8G8B8A8_UNORM_SRGB";
-    case 91: return "B8G8R8A8_UNORM_SRGB";
-    case 93: return "B8G8R8X8_UNORM_SRGB";
-    default: return "other";
+void SetConfigError(const char* text) {
+    strncpy_s(g_configError, text ? text : "", _TRUNCATE);
+}
+
+const char* HostModeName(HostMode mode) {
+    switch (mode) {
+    case HostMode::Observe: return "observe";
+    case HostMode::Rules: return "rules";
+    case HostMode::ForceSdr: return "force_sdr";
+    case HostMode::ForceHdr10: return "force_hdr10";
+    case HostMode::ForceScRgb: return "force_scrgb";
+    case HostMode::MetadataOnly: return "metadata_only";
+    default: return "observe";
+    }
+}
+
+const char* ActionName(Action action) {
+    switch (action) {
+    case Action::Preserve: return "preserve";
+    case Action::Sdr: return "sdr_no_metadata";
+    case Action::Hdr10: return "hdr10_rec2020_pq";
+    case Action::ScRgb: return "scrgb_rec709_linear";
+    case Action::MetadataOnly: return "metadata_only";
+    default: return "preserve";
     }
 }
 
@@ -181,24 +201,14 @@ const char* TransferName(LONG value) {
     }
 }
 
-const char* DetectionModeName(LONG value) {
-    switch (static_cast<DetectionMode>(value)) {
-    case DetectionMode::Automatic: return "automatic";
-    case DetectionMode::ForceSdr: return "force_sdr";
-    case DetectionMode::ForceHdr10: return "force_hdr10_pq";
-    case DetectionMode::ForceScRgb: return "force_scrgb";
-    default: return "automatic";
-    }
-}
-
-const char* DecisionName(LONG value) {
-    switch (static_cast<Decision>(value)) {
-    case Decision::DisabledBypass: return "disabled_bypass";
-    case Decision::SdrBypass: return "sdr_bypass";
-    case Decision::Hdr10: return "hdr10_rec2020_pq";
-    case Decision::ScRgb: return "scrgb_rec709_linear";
-    case Decision::HdrUnknownFormat: return "hdr_unknown_format_metadata_only";
-    default: return "not_observed";
+const char* FormatName(LONG value) {
+    switch (value) {
+    case 10: return "R16G16B16A16_FLOAT";
+    case 24: return "R10G10B10A2_UNORM";
+    case 29: return "R8G8B8A8_UNORM_SRGB";
+    case 91: return "B8G8R8A8_UNORM_SRGB";
+    case 93: return "B8G8R8X8_UNORM_SRGB";
+    default: return "other";
     }
 }
 
@@ -210,7 +220,7 @@ void BuildPaths() {
 
     swprintf_s(
         g_statusPath,
-        L"%sDiscordHDRFix-v101-%lu.json",
+        L"%sDiscordHDRFix-devhost-%lu.json",
         temp,
         GetCurrentProcessId()
     );
@@ -223,132 +233,15 @@ void BuildPaths() {
     );
 
     if (envLen == 0 || envLen >= MAX_PATH) {
-        wcscpy_s(g_configPath, L"tone-map.cfg");
+        wcscpy_s(g_configPath, L"host.cfg");
         return;
     }
 
     swprintf_s(
         g_configPath,
-        L"%s\\DiscordHDRFix\\tone-map.cfg",
+        L"%s\\DiscordHDRFix\\host.cfg",
         localAppData
     );
-}
-
-Config CurrentConfig() {
-    Config c;
-
-    c.enabled =
-        InterlockedCompareExchange(
-            &g_DH_RuntimeEnabled,
-            0,
-            0
-        ) != 0;
-
-    c.white = LoadFloatBits(&g_whiteBits, 460.0f);
-    c.peak = LoadFloatBits(&g_peakBits, 1000.0f);
-
-    LONG mode = InterlockedCompareExchange(
-        &g_DH_DetectionMode,
-        0,
-        0
-    );
-
-    if (mode < static_cast<LONG>(DetectionMode::Automatic) ||
-        mode > static_cast<LONG>(DetectionMode::ForceScRgb)) {
-        mode = static_cast<LONG>(DetectionMode::Automatic);
-    }
-
-    c.detectionMode = static_cast<DetectionMode>(mode);
-    return c;
-}
-
-Config ReadConfig() {
-    Config c = CurrentConfig();
-
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, g_configPath, L"rt") != 0 || !f)
-        return c;
-
-    char line[256]{};
-
-    while (fgets(line, static_cast<int>(sizeof(line)), f)) {
-        int enabled = 0;
-        unsigned detectionMode = 0;
-        float value = 0.0f;
-
-        if (sscanf_s(line, "enabled=%d", &enabled) == 1) {
-            c.enabled = enabled != 0;
-            continue;
-        }
-
-        if (sscanf_s(line, "sdr_white=%f", &value) == 1) {
-            c.white = value;
-            continue;
-        }
-
-        if (sscanf_s(line, "input_max=%f", &value) == 1) {
-            c.peak = value;
-            continue;
-        }
-
-        if (sscanf_s(line, "detection_mode=%u", &detectionMode) == 1) {
-            if (detectionMode <=
-                static_cast<unsigned>(DetectionMode::ForceScRgb)) {
-                c.detectionMode =
-                    static_cast<DetectionMode>(detectionMode);
-            }
-            continue;
-        }
-    }
-
-    fclose(f);
-
-    c.white = std::clamp(c.white, 40.0f, 1000.0f);
-    c.peak = std::clamp(c.peak, 100.0f, 10000.0f);
-
-    return c;
-}
-
-void PublishConfig(const Config& c) {
-    const LONG sequence = InterlockedIncrement(&g_metadataWriteIndex);
-    const unsigned index =
-        static_cast<unsigned>(sequence) % 256u;
-
-    HdrMetadata& m = g_metadataRing[index];
-    m.sdrWhiteLevel = c.white;
-    m.inputMaxLuminance = c.peak;
-    m.state = 1;
-    m.padding[0] = 0;
-    m.padding[1] = 0;
-    m.padding[2] = 0;
-
-    MemoryBarrier();
-
-    InterlockedExchangePointer(
-        reinterpret_cast<PVOID volatile*>(&g_DH_ActiveMetadataPtr),
-        static_cast<void*>(&m)
-    );
-
-    InterlockedExchange(
-        &g_DH_RuntimeEnabled,
-        c.enabled ? 1 : 0
-    );
-
-    InterlockedExchange(
-        &g_DH_DetectionMode,
-        static_cast<LONG>(c.detectionMode)
-    );
-
-    StoreFloatBits(&g_whiteBits, c.white);
-    StoreFloatBits(&g_peakBits, c.peak);
-}
-
-bool ConfigChanged(const Config& a, const Config& b) {
-    return
-        a.enabled != b.enabled ||
-        a.white != b.white ||
-        a.peak != b.peak ||
-        a.detectionMode != b.detectionMode;
 }
 
 bool EqualBytes(
@@ -364,8 +257,8 @@ bool VerifyDiscordBuild(HMODULE voice) {
 
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        SetSignature("discord_voice.node DOS header mismatch");
-        SetError("invalid DOS header");
+        SetSignature("DOS header mismatch");
+        SetError("invalid discord_voice.node DOS header");
         return false;
     }
 
@@ -375,292 +268,578 @@ bool VerifyDiscordBuild(HMODULE voice) {
 
     if (nt->Signature != IMAGE_NT_SIGNATURE ||
         nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-        SetSignature("discord_voice.node PE32+ header mismatch");
-        SetError("invalid PE32+ header");
+        SetSignature("PE header mismatch");
+        SetError("invalid discord_voice.node PE32+ header");
         return false;
     }
 
     if (nt->FileHeader.TimeDateStamp != kExpectedTimeDateStamp ||
         nt->OptionalHeader.SizeOfImage != kExpectedSizeOfImage) {
         SetSignature("unsupported discord_voice.node build");
-        SetError("discord_voice.node version changed; refusing to patch");
+        SetError("Discord build changed; dev host refused to patch");
         return false;
     }
 
-    // Function establishes r12 = rdx (WumpusFrame*) near entry.
-    constexpr std::uint8_t frameSave[] = {
-        0x49, 0x89, 0xd4
-    };
-
-    constexpr std::uint8_t nullArg[] = {
-        0x48, 0xc7, 0x44, 0x24, 0x40,
-        0x00, 0x00, 0x00, 0x00
-    };
-
-    constexpr std::uint8_t callBytes[] = {
-        0xe8, 0x69, 0xf6, 0x12, 0x00
-    };
-
-    constexpr std::uint8_t wrapperPrologue[] = {
-        0x41, 0x57, 0x41, 0x56,
-        0x41, 0x55, 0x41, 0x54,
-        0x56, 0x57, 0x55, 0x53,
+    constexpr std::uint8_t wrapperPrologue[kPatchedPrologueSize] = {
+        0x41, 0x57,
+        0x41, 0x56,
+        0x41, 0x55,
+        0x41, 0x54,
+        0x56,
+        0x57,
+        0x55,
+        0x53,
         0x48, 0x83, 0xec, 0x68
     };
 
-    // Independent direct bool read:
-    // movzx eax, byte ptr [r13+0x1da]
-    constexpr std::uint8_t independentHdrRead[] = {
-        0x41, 0x0f, 0xb6, 0x85,
-        0xda, 0x01, 0x00, 0x00
-    };
+    auto* wrapper = base + kRendererWrapperRva;
 
     if (!EqualBytes(
-            base + kVideoHookFrameSaveRva,
-            frameSave,
-            sizeof(frameSave))) {
-        SetSignature("Video Hook WumpusFrame register signature mismatch");
-        SetError("r12=WumpusFrame signature changed; refusing to patch");
-        return false;
-    }
-
-    if (!EqualBytes(
-            base + kVideoHookNullMetadataRva,
-            nullArg,
-            sizeof(nullArg))) {
-        SetSignature("Video Hook null HDR metadata signature mismatch");
-        SetError("Video Hook HDR metadata callsite changed");
-        return false;
-    }
-
-    if (!EqualBytes(
-            base + kVideoHookRendererCallRva,
-            callBytes,
-            sizeof(callBytes))) {
-        SetSignature("Video Hook renderer call signature mismatch");
-        SetError("Video Hook renderer CALL changed");
-        return false;
-    }
-
-    if (!EqualBytes(
-            base + kRendererWrapperRva,
+            wrapper,
             wrapperPrologue,
             sizeof(wrapperPrologue))) {
-        SetSignature("renderer signature mismatch");
-        SetError("renderer wrapper signature changed");
+        SetSignature("shared renderer signature mismatch");
+        SetError("renderer prologue changed; dev host refused to patch");
         return false;
     }
 
-    if (!EqualBytes(
-            base + kIndependentIsSourceHdrReadRva,
-            independentHdrRead,
-            sizeof(independentHdrRead))) {
-        SetSignature("is_source_hdr layout signature mismatch");
-        SetError("WumpusFrame is_source_hdr offset changed; refusing to patch");
-        return false;
-    }
+    std::memcpy(
+        g_originalPrologue,
+        wrapperPrologue,
+        sizeof(g_originalPrologue)
+    );
 
-    // Verify original rel32 CALL resolves to the renderer wrapper we analyzed.
-    const auto* call = base + kVideoHookRendererCallRva;
-    std::int32_t displacement = 0;
-    std::memcpy(&displacement, call + 1, sizeof(displacement));
+    g_voiceModule = voice;
+    g_voiceBase = reinterpret_cast<std::uintptr_t>(base);
+    g_voiceSize = nt->OptionalHeader.SizeOfImage;
 
-    const std::uintptr_t destination =
-        reinterpret_cast<std::uintptr_t>(call + 5) +
-        static_cast<std::intptr_t>(displacement);
-
-    if (destination !=
-        reinterpret_cast<std::uintptr_t>(
-            base + kRendererWrapperRva
-        )) {
-        SetSignature("renderer call target mismatch");
-        SetError("renderer wrapper destination changed");
-        return false;
-    }
-
-    SetSignature("matched exact analyzed build + is_source_hdr layout");
+    SetSignature("matched exact analyzed shared renderer wrapper");
     SetError("");
     return true;
 }
 
-std::uintptr_t AlignUp(
-    std::uintptr_t value,
-    std::uintptr_t alignment
+void WriteAbsoluteIndirectJump(
+    std::uint8_t* destination,
+    std::uintptr_t target
 ) {
-    return (value + alignment - 1) & ~(alignment - 1);
+    destination[0] = 0xff;
+    destination[1] = 0x25;
+    destination[2] = 0x00;
+    destination[3] = 0x00;
+    destination[4] = 0x00;
+    destination[5] = 0x00;
+
+    std::memcpy(
+        destination + 6,
+        &target,
+        sizeof(target)
+    );
 }
 
-void* AllocateNear(void* target, SIZE_T size) {
-    SYSTEM_INFO info{};
-    GetSystemInfo(&info);
+bool BuildTrampoline(HMODULE voice) {
+    auto* base = reinterpret_cast<std::uint8_t*>(voice);
+    auto* wrapper = base + kRendererWrapperRva;
 
-    const std::uintptr_t granularity =
-        static_cast<std::uintptr_t>(
-            info.dwAllocationGranularity
-        );
+    constexpr SIZE_T trampolineSize = 64;
 
-    const std::uintptr_t targetAddress =
-        reinterpret_cast<std::uintptr_t>(target);
-
-    constexpr std::uintptr_t reach = 0x70000000ull;
-
-    const std::uintptr_t processMin =
-        reinterpret_cast<std::uintptr_t>(
-            info.lpMinimumApplicationAddress
-        );
-
-    const std::uintptr_t processMax =
-        reinterpret_cast<std::uintptr_t>(
-            info.lpMaximumApplicationAddress
-        );
-
-    const std::uintptr_t minimum =
-        targetAddress > reach
-            ? std::max(processMin, targetAddress - reach)
-            : processMin;
-
-    const std::uintptr_t maximum =
-        std::min(processMax, targetAddress + reach);
-
-    std::uintptr_t cursor = AlignUp(minimum, granularity);
-
-    while (cursor < maximum) {
-        MEMORY_BASIC_INFORMATION mbi{};
-
-        if (VirtualQuery(
-                reinterpret_cast<void*>(cursor),
-                &mbi,
-                sizeof(mbi)) == 0) {
-            break;
-        }
-
-        const std::uintptr_t regionBase =
-            reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-
-        const std::uintptr_t regionEnd =
-            regionBase + mbi.RegionSize;
-
-        if (mbi.State == MEM_FREE) {
-            const std::uintptr_t candidate =
-                AlignUp(
-                    std::max(cursor, regionBase),
-                    granularity
-                );
-
-            if (candidate + size <= regionEnd &&
-                candidate + size <= maximum) {
-                if (void* allocation = VirtualAlloc(
-                        reinterpret_cast<void*>(candidate),
-                        size,
-                        MEM_RESERVE | MEM_COMMIT,
-                        PAGE_EXECUTE_READWRITE)) {
-                    return allocation;
-                }
-            }
-        }
-
-        if (regionEnd <= cursor)
-            break;
-
-        cursor = AlignUp(regionEnd, granularity);
-    }
-
-    return nullptr;
-}
-
-template <typename T>
-void WriteImmediate(std::uint8_t* dest, T value) {
-    std::memcpy(dest, &value, sizeof(value));
-}
-
-bool BuildNearRelay(std::uint8_t* callSite) {
-    constexpr SIZE_T allocationSize = 0x1000;
-
-    g_nearRelay = static_cast<std::uint8_t*>(
-        AllocateNear(callSite, allocationSize)
+    g_trampoline = static_cast<std::uint8_t*>(
+        VirtualAlloc(
+            nullptr,
+            trampolineSize,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE
+        )
     );
 
-    if (!g_nearRelay) {
-        SetError("VirtualAlloc failed for near relay");
+    if (!g_trampoline) {
+        SetError("VirtualAlloc failed for renderer trampoline");
         return false;
     }
 
-    std::memset(g_nearRelay, 0xcc, allocationSize);
+    std::memset(g_trampoline, 0xcc, trampolineSize);
 
-    std::size_t p = 0;
-
-    // mov rax, DiscordHDRFixRelay
-    g_nearRelay[p++] = 0x48;
-    g_nearRelay[p++] = 0xb8;
-
-    WriteImmediate(
-        g_nearRelay + p,
-        reinterpret_cast<std::uintptr_t>(&DiscordHDRFixRelay)
+    std::memcpy(
+        g_trampoline,
+        g_originalPrologue,
+        kPatchedPrologueSize
     );
-    p += sizeof(std::uintptr_t);
 
-    // jmp rax
-    g_nearRelay[p++] = 0xff;
-    g_nearRelay[p++] = 0xe0;
+    WriteAbsoluteIndirectJump(
+        g_trampoline + kPatchedPrologueSize,
+        reinterpret_cast<std::uintptr_t>(
+            wrapper + kPatchedPrologueSize
+        )
+    );
 
     FlushInstructionCache(
         GetCurrentProcess(),
-        g_nearRelay,
-        allocationSize
+        g_trampoline,
+        trampolineSize
     );
+
+    g_originalRenderer =
+        reinterpret_cast<RendererFn>(g_trampoline);
 
     return true;
 }
 
-bool PatchVideoHookCall(HMODULE voice) {
-    auto* base = reinterpret_cast<std::uint8_t*>(voice);
-    auto* callSite = base + kVideoHookRendererCallRva;
+bool SafeReadSource(
+    void* sourcePtr,
+    LONG& format,
+    LONG& primaries,
+    LONG& transfer
+) {
+    format = -1;
+    primaries = -1;
+    transfer = -1;
 
-    InterlockedExchangePointer(
-        reinterpret_cast<PVOID volatile*>(&g_DH_OriginalRenderer),
-        static_cast<void*>(base + kRendererWrapperRva)
-    );
-
-    if (!BuildNearRelay(callSite))
+    if (!sourcePtr)
         return false;
 
-    const std::intptr_t from =
-        reinterpret_cast<std::intptr_t>(callSite + 5);
+    __try {
+        auto* p = static_cast<std::uint8_t*>(sourcePtr);
 
-    const std::intptr_t to =
-        reinterpret_cast<std::intptr_t>(g_nearRelay);
+        format = static_cast<LONG>(
+            *reinterpret_cast<std::uint32_t*>(
+                p + kSourceFormatOffset
+            )
+        );
 
-    const std::intptr_t delta = to - from;
+        primaries = static_cast<LONG>(
+            *(p + kSourcePrimariesOffset)
+        );
 
-    if (delta < static_cast<std::intptr_t>(INT32_MIN) ||
-        delta > static_cast<std::intptr_t>(INT32_MAX)) {
-        SetError("near relay is outside CALL rel32 range");
+        transfer = static_cast<LONG>(
+            *(p + kSourceTransferOffset)
+        );
+
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
 
-    std::uint8_t patch[5] = { 0xe8, 0, 0, 0, 0 };
+bool SafeWriteSource(
+    void* sourcePtr,
+    std::uint8_t primaries,
+    std::uint8_t transfer
+) {
+    if (!sourcePtr)
+        return false;
 
-    WriteImmediate(
-        patch + 1,
-        static_cast<std::int32_t>(delta)
+    __try {
+        auto* p = static_cast<std::uint8_t*>(sourcePtr);
+        *(p + kSourcePrimariesOffset) = primaries;
+        *(p + kSourceTransferOffset) = transfer;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+std::uintptr_t CallerRvaFromAddress(std::uintptr_t address) {
+    if (address < g_voiceBase ||
+        address >= g_voiceBase + g_voiceSize) {
+        return 0;
+    }
+
+    return address - g_voiceBase;
+}
+
+bool MetadataMatches(
+    MetadataMatch match,
+    void* originalMetadata
+) {
+    switch (match) {
+    case MetadataMatch::Any:
+        return true;
+    case MetadataMatch::Null:
+        return originalMetadata == nullptr;
+    case MetadataMatch::NonNull:
+        return originalMetadata != nullptr;
+    default:
+        return false;
+    }
+}
+
+Action SelectAction(
+    const RuntimeConfig& cfg,
+    std::uintptr_t callerRva,
+    LONG format,
+    void* originalMetadata
+) {
+    if (!cfg.enabled)
+        return Action::Preserve;
+
+    switch (cfg.mode) {
+    case HostMode::Observe:
+        return Action::Preserve;
+
+    case HostMode::ForceSdr:
+        return Action::Sdr;
+
+    case HostMode::ForceHdr10:
+        return Action::Hdr10;
+
+    case HostMode::ForceScRgb:
+        return Action::ScRgb;
+
+    case HostMode::MetadataOnly:
+        return Action::MetadataOnly;
+
+    case HostMode::Rules:
+        break;
+
+    default:
+        return Action::Preserve;
+    }
+
+    for (std::size_t i = 0; i < cfg.ruleCount; ++i) {
+        const Rule& rule = cfg.rules[i];
+
+        if (rule.callerRva != callerRva)
+            continue;
+
+        if (rule.format >= 0 &&
+            rule.format != format) {
+            continue;
+        }
+
+        if (!MetadataMatches(
+                rule.metadataMatch,
+                originalMetadata)) {
+            continue;
+        }
+
+        return rule.action;
+    }
+
+    return Action::Preserve;
+}
+
+HdrMetadata* PublishMetadata(float white, float peak) {
+    LONG seq = InterlockedIncrement(&g_metadataIndex);
+
+    const unsigned index =
+        static_cast<unsigned>(seq) % 256u;
+
+    HdrMetadata& m = g_metadataRing[index];
+
+    m.sdrWhiteLevel = white;
+    m.inputMaxLuminance = peak;
+    m.state = 1;
+    m.padding[0] = 0;
+    m.padding[1] = 0;
+    m.padding[2] = 0;
+
+    MemoryBarrier();
+
+    return &m;
+}
+
+void Trace(
+    const RuntimeConfig& cfg,
+    std::uintptr_t callerRva,
+    void* sourcePtr,
+    void* originalMetadata,
+    LONG format,
+    LONG originalPrimaries,
+    LONG originalTransfer,
+    LONG effectivePrimaries,
+    LONG effectiveTransfer,
+    Action action,
+    bool sourceReadable
+) {
+    if (!cfg.traceEnabled)
+        return;
+
+    const unsigned long long sequence =
+        static_cast<unsigned long long>(
+            InterlockedIncrement64(
+                &g_traceWriteIndex
+            )
+        );
+
+    const std::size_t index =
+        static_cast<std::size_t>(
+            (sequence - 1) % kTraceCapacity
+        );
+
+    TraceEvent& e = g_trace[index];
+
+    e.callerRva =
+        static_cast<LONG64>(callerRva);
+
+    e.sourcePointer =
+        reinterpret_cast<LONG64>(sourcePtr);
+
+    e.originalMetadataPointer =
+        reinterpret_cast<LONG64>(originalMetadata);
+
+    e.format = format;
+    e.originalPrimaries = originalPrimaries;
+    e.originalTransfer = originalTransfer;
+    e.effectivePrimaries = effectivePrimaries;
+    e.effectiveTransfer = effectiveTransfer;
+    e.action = static_cast<LONG>(action);
+    e.sourceReadable = sourceReadable ? 1 : 0;
+
+    MemoryBarrier();
+
+    InterlockedExchange64(
+        &e.sequence,
+        static_cast<LONG64>(sequence)
     );
+}
+
+void* __fastcall HookRenderer(
+    void* a1,
+    void* a2,
+    void* a3,
+    void* a4,
+    void* a5,
+    void* a6,
+    void* a7,
+    void* a8,
+    void* a9
+) {
+    InterlockedIncrement64(&g_totalRendererCalls);
+
+    const auto returnAddress =
+        reinterpret_cast<std::uintptr_t>(
+            _ReturnAddress()
+        );
+
+    const std::uintptr_t callerRva =
+        CallerRvaFromAddress(returnAddress);
+
+    LONG format = -1;
+    LONG originalPrimaries = -1;
+    LONG originalTransfer = -1;
+
+    const bool sourceReadable =
+        SafeReadSource(
+            a4,
+            format,
+            originalPrimaries,
+            originalTransfer
+        );
+
+    LONG effectivePrimaries = originalPrimaries;
+    LONG effectiveTransfer = originalTransfer;
+
+    const RuntimeConfig* cfgPtr =
+        g_activeConfig.load(
+            std::memory_order_acquire
+        );
+
+    RuntimeConfig fallback{};
+    const RuntimeConfig& cfg =
+        cfgPtr ? *cfgPtr : fallback;
+
+    const Action action =
+        SelectAction(
+            cfg,
+            callerRva,
+            format,
+            a9
+        );
+
+    bool sourceChanged = false;
+    void* effectiveMetadata = a9;
+
+    if (action == Action::Sdr) {
+        effectiveMetadata = nullptr;
+    }
+    else if (action == Action::Hdr10) {
+        if (sourceReadable) {
+            sourceChanged =
+                SafeWriteSource(
+                    a4,
+                    1,
+                    2
+                );
+
+            if (sourceChanged) {
+                effectivePrimaries = 1;
+                effectiveTransfer = 2;
+                InterlockedIncrement64(
+                    &g_totalSourceOverrides
+                );
+            }
+        }
+
+        effectiveMetadata =
+            PublishMetadata(
+                cfg.sdrWhite,
+                cfg.inputMax
+            );
+
+        InterlockedIncrement64(
+            &g_totalMetadataInjected
+        );
+    }
+    else if (action == Action::ScRgb) {
+        if (sourceReadable) {
+            sourceChanged =
+                SafeWriteSource(
+                    a4,
+                    0,
+                    0
+                );
+
+            if (sourceChanged) {
+                effectivePrimaries = 0;
+                effectiveTransfer = 0;
+                InterlockedIncrement64(
+                    &g_totalSourceOverrides
+                );
+            }
+        }
+
+        effectiveMetadata =
+            PublishMetadata(
+                cfg.sdrWhite,
+                cfg.inputMax
+            );
+
+        InterlockedIncrement64(
+            &g_totalMetadataInjected
+        );
+    }
+    else if (action == Action::MetadataOnly) {
+        effectiveMetadata =
+            PublishMetadata(
+                cfg.sdrWhite,
+                cfg.inputMax
+            );
+
+        InterlockedIncrement64(
+            &g_totalMetadataInjected
+        );
+    }
+
+    if (action != Action::Preserve) {
+        InterlockedIncrement64(
+            &g_totalModifiedCalls
+        );
+    }
+
+    InterlockedExchange64(
+        &g_lastCallerRva,
+        static_cast<LONG64>(callerRva)
+    );
+
+    InterlockedExchange(&g_lastFormat, format);
+
+    InterlockedExchange(
+        &g_lastOriginalPrimaries,
+        originalPrimaries
+    );
+
+    InterlockedExchange(
+        &g_lastOriginalTransfer,
+        originalTransfer
+    );
+
+    InterlockedExchange(
+        &g_lastEffectivePrimaries,
+        effectivePrimaries
+    );
+
+    InterlockedExchange(
+        &g_lastEffectiveTransfer,
+        effectiveTransfer
+    );
+
+    InterlockedExchange(
+        &g_lastAction,
+        static_cast<LONG>(action)
+    );
+
+    InterlockedExchange(
+        &g_lastSourceReadable,
+        sourceReadable ? 1 : 0
+    );
+
+    InterlockedExchange(
+        &g_lastMetadataWasNull,
+        a9 == nullptr ? 1 : 0
+    );
+
+    Trace(
+        cfg,
+        callerRva,
+        a4,
+        a9,
+        format,
+        originalPrimaries,
+        originalTransfer,
+        effectivePrimaries,
+        effectiveTransfer,
+        action,
+        sourceReadable
+    );
+
+    void* result = g_originalRenderer(
+        a1, a2, a3, a4,
+        a5, a6, a7, a8,
+        effectiveMetadata
+    );
+
+    if (sourceChanged) {
+        SafeWriteSource(
+            a4,
+            static_cast<std::uint8_t>(
+                originalPrimaries
+            ),
+            static_cast<std::uint8_t>(
+                originalTransfer
+            )
+        );
+    }
+
+    return result;
+}
+
+bool PatchRendererEntry(HMODULE voice) {
+    auto* base = reinterpret_cast<std::uint8_t*>(voice);
+    auto* wrapper = base + kRendererWrapperRva;
+
+    if (!BuildTrampoline(voice))
+        return false;
+
+    std::uint8_t patch[kPatchedPrologueSize]{};
+
+    WriteAbsoluteIndirectJump(
+        patch,
+        reinterpret_cast<std::uintptr_t>(
+            &HookRenderer
+        )
+    );
+
+    patch[14] = 0x90;
+    patch[15] = 0x90;
 
     DWORD oldProtection = 0;
 
     if (!VirtualProtect(
-            callSite,
+            wrapper,
             sizeof(patch),
             PAGE_EXECUTE_READWRITE,
             &oldProtection)) {
-        SetError("VirtualProtect failed for Video Hook renderer call");
+        SetError("VirtualProtect failed for shared renderer");
         return false;
     }
 
-    std::memcpy(callSite, patch, sizeof(patch));
+    std::memcpy(wrapper, patch, sizeof(patch));
 
     DWORD ignored = 0;
+
     VirtualProtect(
-        callSite,
+        wrapper,
         sizeof(patch),
         oldProtection,
         &ignored
@@ -668,130 +847,908 @@ bool PatchVideoHookCall(HMODULE voice) {
 
     FlushInstructionCache(
         GetCurrentProcess(),
-        callSite,
+        wrapper,
         sizeof(patch)
     );
 
     return true;
 }
 
-unsigned long long ReadCounter(volatile LONG64* value) {
-    return static_cast<unsigned long long>(
-        InterlockedCompareExchange64(value, 0, 0)
+HostMode ParseHostMode(const char* value) {
+    if (_stricmp(value, "rules") == 0)
+        return HostMode::Rules;
+
+    if (_stricmp(value, "force_sdr") == 0)
+        return HostMode::ForceSdr;
+
+    if (_stricmp(value, "force_hdr10") == 0)
+        return HostMode::ForceHdr10;
+
+    if (_stricmp(value, "force_scrgb") == 0)
+        return HostMode::ForceScRgb;
+
+    if (_stricmp(value, "metadata_only") == 0)
+        return HostMode::MetadataOnly;
+
+    return HostMode::Observe;
+}
+
+Action ParseAction(const char* value) {
+    if (_stricmp(value, "sdr") == 0)
+        return Action::Sdr;
+
+    if (_stricmp(value, "hdr10") == 0)
+        return Action::Hdr10;
+
+    if (_stricmp(value, "scrgb") == 0)
+        return Action::ScRgb;
+
+    if (_stricmp(value, "metadata") == 0)
+        return Action::MetadataOnly;
+
+    return Action::Preserve;
+}
+
+MetadataMatch ParseMetadataMatch(
+    const char* value
+) {
+    if (_stricmp(value, "null") == 0)
+        return MetadataMatch::Null;
+
+    if (_stricmp(value, "nonnull") == 0)
+        return MetadataMatch::NonNull;
+
+    return MetadataMatch::Any;
+}
+
+bool ParseUnsigned(
+    const char* text,
+    std::uintptr_t& value
+) {
+    if (!text || !*text)
+        return false;
+
+    char* end = nullptr;
+
+    unsigned long long parsed =
+        std::strtoull(
+            text,
+            &end,
+            0
+        );
+
+    if (end == text || *end != '\0')
+        return false;
+
+    value = static_cast<std::uintptr_t>(
+        parsed
+    );
+
+    return true;
+}
+
+void Trim(char* text) {
+    if (!text)
+        return;
+
+    char* start = text;
+
+    while (*start == ' ' ||
+           *start == '\t' ||
+           *start == '\r' ||
+           *start == '\n') {
+        ++start;
+    }
+
+    if (start != text)
+        std::memmove(
+            text,
+            start,
+            std::strlen(start) + 1
+        );
+
+    const std::size_t len =
+        std::strlen(text);
+
+    if (len == 0)
+        return;
+
+    char* end =
+        text + len - 1;
+
+    while (end >= text &&
+           (*end == ' ' ||
+            *end == '\t' ||
+            *end == '\r' ||
+            *end == '\n')) {
+        *end = '\0';
+
+        if (end == text)
+            break;
+
+        --end;
+    }
+}
+
+bool ParseRules(
+    const char* text,
+    RuntimeConfig& cfg
+) {
+    cfg.ruleCount = 0;
+
+    if (!text || !*text)
+        return true;
+
+    char buffer[4096]{};
+    strncpy_s(buffer, text, _TRUNCATE);
+
+    char* context = nullptr;
+
+    for (char* entry = strtok_s(
+            buffer,
+            ";",
+            &context);
+         entry != nullptr;
+         entry = strtok_s(
+            nullptr,
+            ";",
+            &context)) {
+        Trim(entry);
+
+        if (!*entry)
+            continue;
+
+        if (cfg.ruleCount >= kMaxRules) {
+            SetConfigError(
+                "Too many rules; maximum is 32"
+            );
+            return false;
+        }
+
+        char ruleText[512]{};
+        strncpy_s(
+            ruleText,
+            entry,
+            _TRUNCATE
+        );
+
+        char* fieldContext = nullptr;
+
+        char* callerText =
+            strtok_s(
+                ruleText,
+                ",",
+                &fieldContext
+            );
+
+        char* formatText =
+            strtok_s(
+                nullptr,
+                ",",
+                &fieldContext
+            );
+
+        char* metadataText =
+            strtok_s(
+                nullptr,
+                ",",
+                &fieldContext
+            );
+
+        char* actionText =
+            strtok_s(
+                nullptr,
+                ",",
+                &fieldContext
+            );
+
+        if (!callerText ||
+            !formatText ||
+            !metadataText ||
+            !actionText) {
+            SetConfigError(
+                "Rule syntax: callerRva,format|any,metadata(any|null|nonnull),action"
+            );
+            return false;
+        }
+
+        Trim(callerText);
+        Trim(formatText);
+        Trim(metadataText);
+        Trim(actionText);
+
+        Rule rule{};
+
+        if (!ParseUnsigned(
+                callerText,
+                rule.callerRva)) {
+            SetConfigError(
+                "Invalid caller RVA in rule"
+            );
+            return false;
+        }
+
+        if (_stricmp(
+                formatText,
+                "any") == 0) {
+            rule.format = -1;
+        } else {
+            std::uintptr_t parsedFormat = 0;
+
+            if (!ParseUnsigned(
+                    formatText,
+                    parsedFormat)) {
+                SetConfigError(
+                    "Invalid format in rule"
+                );
+                return false;
+            }
+
+            rule.format =
+                static_cast<int>(
+                    parsedFormat
+                );
+        }
+
+        rule.metadataMatch =
+            ParseMetadataMatch(
+                metadataText
+            );
+
+        rule.action =
+            ParseAction(
+                actionText
+            );
+
+        cfg.rules[cfg.ruleCount++] =
+            rule;
+    }
+
+    return true;
+}
+
+RuntimeConfig* ReadConfig() {
+    auto* cfg = new RuntimeConfig();
+
+    const RuntimeConfig* previous =
+        g_activeConfig.load(
+            std::memory_order_acquire
+        );
+
+    if (previous) {
+        *cfg = *previous;
+        cfg->generation =
+            previous->generation + 1;
+    }
+
+    FILE* f = nullptr;
+
+    if (_wfopen_s(
+            &f,
+            g_configPath,
+            L"rt") != 0 ||
+        !f) {
+        SetConfigError("");
+        return cfg;
+    }
+
+    char rulesText[4096]{};
+
+    char line[4608]{};
+
+    while (fgets(
+            line,
+            static_cast<int>(
+                sizeof(line)
+            ),
+            f)) {
+        Trim(line);
+
+        if (!*line ||
+            line[0] == '#') {
+            continue;
+        }
+
+        int intValue = 0;
+        float floatValue = 0.0f;
+        char textValue[4096]{};
+
+        if (sscanf_s(
+                line,
+                "enabled=%d",
+                &intValue) == 1) {
+            cfg->enabled =
+                intValue != 0;
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "trace=%d",
+                &intValue) == 1) {
+            cfg->traceEnabled =
+                intValue != 0;
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "sdr_white=%f",
+                &floatValue) == 1) {
+            cfg->sdrWhite =
+                std::clamp(
+                    floatValue,
+                    40.0f,
+                    1000.0f
+                );
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "input_max=%f",
+                &floatValue) == 1) {
+            cfg->inputMax =
+                std::clamp(
+                    floatValue,
+                    100.0f,
+                    10000.0f
+                );
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "mode=%4095s",
+                textValue,
+                static_cast<unsigned>(
+                    sizeof(textValue))) == 1) {
+            cfg->mode =
+                ParseHostMode(
+                    textValue
+                );
+            continue;
+        }
+
+        if (strncmp(
+                line,
+                "rules=",
+                6) == 0) {
+            strncpy_s(
+                rulesText,
+                line + 6,
+                _TRUNCATE
+            );
+            continue;
+        }
+    }
+
+    fclose(f);
+
+    SetConfigError("");
+
+    if (!ParseRules(
+            rulesText,
+            *cfg)) {
+        delete cfg;
+        return nullptr;
+    }
+
+    return cfg;
+}
+
+void PublishConfig(RuntimeConfig* cfg) {
+    if (!cfg)
+        return;
+
+    g_activeConfig.store(
+        cfg,
+        std::memory_order_release
     );
 }
 
-LONG ReadLong(volatile LONG* value) {
-    return InterlockedCompareExchange(value, 0, 0);
+unsigned long long ReadCounter(
+    volatile LONG64* value
+) {
+    return static_cast<unsigned long long>(
+        InterlockedCompareExchange64(
+            value,
+            0,
+            0
+        )
+    );
+}
+
+LONG ReadLong(
+    volatile LONG* value
+) {
+    return InterlockedCompareExchange(
+        value,
+        0,
+        0
+    );
+}
+
+std::size_t SnapshotCallers(
+    std::array<CallerBucket, 64>& buckets,
+    unsigned long long& validEvents,
+    unsigned long long& windowStart,
+    unsigned long long& windowEnd
+) {
+    buckets = {};
+    validEvents = 0;
+
+    const unsigned long long current =
+        ReadCounter(
+            &g_traceWriteIndex
+        );
+
+    windowEnd = current;
+
+    if (current == 0) {
+        windowStart = 0;
+        return 0;
+    }
+
+    const unsigned long long available =
+        std::min<unsigned long long>(
+            current,
+            kTraceCapacity
+        );
+
+    const unsigned long long first =
+        current - available + 1;
+
+    windowStart = first;
+
+    std::size_t bucketCount = 0;
+
+    for (unsigned long long seq = first;
+         seq <= current;
+         ++seq) {
+        const std::size_t index =
+            static_cast<std::size_t>(
+                (seq - 1) %
+                kTraceCapacity
+            );
+
+        TraceEvent& event =
+            g_trace[index];
+
+        const unsigned long long committed =
+            static_cast<unsigned long long>(
+                InterlockedCompareExchange64(
+                    &event.sequence,
+                    0,
+                    0
+                )
+            );
+
+        if (committed != seq)
+            continue;
+
+        MemoryBarrier();
+
+        const std::uintptr_t callerRva =
+            static_cast<std::uintptr_t>(
+                InterlockedCompareExchange64(
+                    &event.callerRva,
+                    0,
+                    0
+                )
+            );
+
+        const auto metadata =
+            reinterpret_cast<void*>(
+                InterlockedCompareExchange64(
+                    &event.originalMetadataPointer,
+                    0,
+                    0
+                )
+            );
+
+        const LONG readable =
+            ReadLong(
+                &event.sourceReadable
+            );
+
+        const LONG format =
+            ReadLong(
+                &event.format
+            );
+
+        const LONG primaries =
+            ReadLong(
+                &event.originalPrimaries
+            );
+
+        const LONG transfer =
+            ReadLong(
+                &event.originalTransfer
+            );
+
+        const LONG action =
+            ReadLong(
+                &event.action
+            );
+
+        ++validEvents;
+
+        std::size_t bucketIndex =
+            bucketCount;
+
+        for (std::size_t i = 0;
+             i < bucketCount;
+             ++i) {
+            if (buckets[i].callerRva ==
+                callerRva) {
+                bucketIndex = i;
+                break;
+            }
+        }
+
+        if (bucketIndex == bucketCount) {
+            if (bucketCount >=
+                buckets.size()) {
+                continue;
+            }
+
+            buckets[bucketCount].callerRva =
+                callerRva;
+
+            ++bucketCount;
+        }
+
+        CallerBucket& bucket =
+            buckets[bucketIndex];
+
+        ++bucket.count;
+
+        if (metadata == nullptr)
+            ++bucket.metadataNull;
+        else
+            ++bucket.metadataNonNull;
+
+        if (!readable)
+            ++bucket.sourceUnreadable;
+
+        bucket.lastFormat = format;
+        bucket.lastPrimaries = primaries;
+        bucket.lastTransfer = transfer;
+        bucket.lastAction = action;
+    }
+
+    std::sort(
+        buckets.begin(),
+        buckets.begin() + bucketCount,
+        [](const CallerBucket& a,
+           const CallerBucket& b) {
+            return a.count > b.count;
+        }
+    );
+
+    return bucketCount;
+}
+
+void AppendFormat(
+    char* buffer,
+    std::size_t capacity,
+    std::size_t& used,
+    const char* format,
+    ...
+) {
+    if (used >= capacity)
+        return;
+
+    va_list args;
+    va_start(args, format);
+
+    const int written =
+        _vsnprintf_s(
+            buffer + used,
+            capacity - used,
+            _TRUNCATE,
+            format,
+            args
+        );
+
+    va_end(args);
+
+    if (written > 0)
+        used +=
+            static_cast<std::size_t>(
+                written
+            );
 }
 
 void WriteStatus() {
-    const float white =
-        LoadFloatBits(&g_whiteBits, 460.0f);
+    const RuntimeConfig* cfg =
+        g_activeConfig.load(
+            std::memory_order_acquire
+        );
 
-    const float peak =
-        LoadFloatBits(&g_peakBits, 1000.0f);
+    RuntimeConfig fallback{};
+    const RuntimeConfig& c =
+        cfg ? *cfg : fallback;
 
-    const LONG mode = ReadLong(&g_DH_DetectionMode);
-    const LONG format = ReadLong(&g_DH_LastSourceFormat);
-    const LONG sourceIsHdr = ReadLong(&g_DH_LastSourceIsHdr);
-    const LONG originalPrimaries =
-        ReadLong(&g_DH_LastOriginalPrimaries);
-    const LONG originalTransfer =
-        ReadLong(&g_DH_LastOriginalTransfer);
-    const LONG effectivePrimaries =
-        ReadLong(&g_DH_LastEffectivePrimaries);
-    const LONG effectiveTransfer =
-        ReadLong(&g_DH_LastEffectiveTransfer);
-    const LONG decision =
-        ReadLong(&g_DH_LastDecision);
-    const LONG originalMetadataNull =
-        ReadLong(&g_DH_LastOriginalHdrMetadataNull);
+    std::array<CallerBucket, 64> buckets{};
 
-    char json[8192]{};
+    unsigned long long validEvents = 0;
+    unsigned long long windowStart = 0;
+    unsigned long long windowEnd = 0;
 
-    _snprintf_s(
+    const std::size_t bucketCount =
+        SnapshotCallers(
+            buckets,
+            validEvents,
+            windowStart,
+            windowEnd
+        );
+
+    constexpr std::size_t capacity =
+        65536;
+
+    char json[capacity]{};
+    std::size_t used = 0;
+
+    const LONG lastAction =
+        ReadLong(
+            &g_lastAction
+        );
+
+    AppendFormat(
         json,
-        sizeof(json),
-        _TRUNCATE,
+        capacity,
+        used,
         "{\n"
-        "  \"version\": \"1.0.1-auto-test\",\n"
+        "  \"version\": \"1.1.0-devhost\",\n"
         "  \"pid\": %lu,\n"
-        "  \"mode\": \"automatic-hdr-sdr-detection\",\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"
-        "  \"detection_source\": \"WumpusFrame.is_source_hdr\",\n"
-        "  \"wumpus_is_source_hdr_offset\": \"0x1da\",\n"
         "  \"renderer_wrapper_rva\": \"0x52cad0\",\n"
-        "  \"video_hook_return_rva\": \"0x3fd467\",\n"
-        "  \"enabled\": %s,\n"
-        "  \"detection_mode\": \"%s\",\n"
+        "  \"config_generation\": %u,\n"
+        "  \"config_enabled\": %s,\n"
+        "  \"host_mode\": \"%s\",\n"
+        "  \"trace_enabled\": %s,\n"
         "  \"sdr_white_level\": %.3f,\n"
         "  \"input_max_luminance\": %.3f,\n"
-        "  \"metadata_state\": 1,\n"
-        "  \"metadata_size\": 12,\n"
-        "  \"last_source_is_hdr\": %s,\n"
-        "  \"last_decision\": \"%s\",\n"
-        "  \"source_format\": %ld,\n"
-        "  \"source_format_name\": \"%s\",\n"
-        "  \"original_primaries\": %ld,\n"
-        "  \"original_primaries_name\": \"%s\",\n"
-        "  \"original_transfer\": %ld,\n"
-        "  \"original_transfer_name\": \"%s\",\n"
-        "  \"effective_primaries\": %ld,\n"
-        "  \"effective_primaries_name\": \"%s\",\n"
-        "  \"effective_transfer\": %ld,\n"
-        "  \"effective_transfer_name\": \"%s\",\n"
-        "  \"renderer_calls\": %llu,\n"
-        "  \"disabled_bypass_frames\": %llu,\n"
-        "  \"sdr_frames_bypassed\": %llu,\n"
-        "  \"hdr_frames_corrected\": %llu,\n"
-        "  \"hdr10_frames\": %llu,\n"
-        "  \"scrgb_frames\": %llu,\n"
-        "  \"hdr_unknown_format_frames\": %llu,\n"
-        "  \"hdr_metadata_injected\": %llu,\n"
-        "  \"source_color_overrides\": %llu,\n"
-        "  \"last_original_hdr_metadata_null\": %s,\n"
+        "  \"rules_loaded\": %zu,\n"
+        "  \"config_error\": \"%s\",\n"
+        "  \"total_renderer_calls\": %llu,\n"
+        "  \"total_modified_calls\": %llu,\n"
+        "  \"total_metadata_injected\": %llu,\n"
+        "  \"total_source_overrides\": %llu,\n"
+        "  \"last_caller_rva\": \"0x%llx\",\n"
+        "  \"last_format\": %ld,\n"
+        "  \"last_format_name\": \"%s\",\n"
+        "  \"last_original_primaries\": %ld,\n"
+        "  \"last_original_primaries_name\": \"%s\",\n"
+        "  \"last_original_transfer\": %ld,\n"
+        "  \"last_original_transfer_name\": \"%s\",\n"
+        "  \"last_effective_primaries\": %ld,\n"
+        "  \"last_effective_primaries_name\": \"%s\",\n"
+        "  \"last_effective_transfer\": %ld,\n"
+        "  \"last_effective_transfer_name\": \"%s\",\n"
+        "  \"last_action\": \"%s\",\n"
+        "  \"last_source_readable\": %s,\n"
+        "  \"last_original_metadata_null\": %s,\n"
+        "  \"recent_window_start_sequence\": %llu,\n"
+        "  \"recent_window_end_sequence\": %llu,\n"
+        "  \"recent_valid_events\": %llu,\n"
+        "  \"recent_unique_callers\": %zu,\n"
+        "  \"recent_callers\": [\n",
+        GetCurrentProcessId(),
+        ReadLong(&g_hookInstalled)
+            ? "true"
+            : "false",
+        g_signature,
+        c.generation,
+        c.enabled ? "true" : "false",
+        HostModeName(c.mode),
+        c.traceEnabled
+            ? "true"
+            : "false",
+        static_cast<double>(
+            c.sdrWhite
+        ),
+        static_cast<double>(
+            c.inputMax
+        ),
+        c.ruleCount,
+        g_configError,
+        ReadCounter(
+            &g_totalRendererCalls
+        ),
+        ReadCounter(
+            &g_totalModifiedCalls
+        ),
+        ReadCounter(
+            &g_totalMetadataInjected
+        ),
+        ReadCounter(
+            &g_totalSourceOverrides
+        ),
+        static_cast<unsigned long long>(
+            ReadCounter(
+                &g_lastCallerRva
+            )
+        ),
+        ReadLong(&g_lastFormat),
+        FormatName(
+            ReadLong(
+                &g_lastFormat
+            )
+        ),
+        ReadLong(
+            &g_lastOriginalPrimaries
+        ),
+        PrimariesName(
+            ReadLong(
+                &g_lastOriginalPrimaries
+            )
+        ),
+        ReadLong(
+            &g_lastOriginalTransfer
+        ),
+        TransferName(
+            ReadLong(
+                &g_lastOriginalTransfer
+            )
+        ),
+        ReadLong(
+            &g_lastEffectivePrimaries
+        ),
+        PrimariesName(
+            ReadLong(
+                &g_lastEffectivePrimaries
+            )
+        ),
+        ReadLong(
+            &g_lastEffectiveTransfer
+        ),
+        TransferName(
+            ReadLong(
+                &g_lastEffectiveTransfer
+            )
+        ),
+        ActionName(
+            static_cast<Action>(
+                lastAction
+            )
+        ),
+        ReadLong(
+            &g_lastSourceReadable
+        ) ? "true" : "false",
+        ReadLong(
+            &g_lastMetadataWasNull
+        ) < 0
+            ? "null"
+            : (ReadLong(
+                    &g_lastMetadataWasNull
+                ) ? "true" : "false"),
+        windowStart,
+        windowEnd,
+        validEvents,
+        bucketCount
+    );
+
+    const std::size_t show =
+        std::min<std::size_t>(
+            bucketCount,
+            16
+        );
+
+    for (std::size_t i = 0;
+         i < show;
+         ++i) {
+        const CallerBucket& b =
+            buckets[i];
+
+        AppendFormat(
+            json,
+            capacity,
+            used,
+            "    {"
+            "\"caller_rva\":\"0x%llx\","
+            "\"count\":%llu,"
+            "\"metadata_null\":%llu,"
+            "\"metadata_nonnull\":%llu,"
+            "\"source_unreadable\":%llu,"
+            "\"last_format\":%ld,"
+            "\"last_format_name\":\"%s\","
+            "\"last_primaries\":\"%s\","
+            "\"last_transfer\":\"%s\","
+            "\"last_action\":\"%s\""
+            "}%s\n",
+            static_cast<unsigned long long>(
+                b.callerRva
+            ),
+            b.count,
+            b.metadataNull,
+            b.metadataNonNull,
+            b.sourceUnreadable,
+            b.lastFormat,
+            FormatName(
+                b.lastFormat
+            ),
+            PrimariesName(
+                b.lastPrimaries
+            ),
+            TransferName(
+                b.lastTransfer
+            ),
+            ActionName(
+                static_cast<Action>(
+                    b.lastAction
+                )
+            ),
+            (i + 1 < show)
+                ? ","
+                : ""
+        );
+    }
+
+    AppendFormat(
+        json,
+        capacity,
+        used,
+        "  ],\n"
+        "  \"rules\": [\n"
+    );
+
+    for (std::size_t i = 0;
+         i < c.ruleCount;
+         ++i) {
+        const Rule& r = c.rules[i];
+
+        const char* metadataName =
+            r.metadataMatch ==
+                MetadataMatch::Null
+            ? "null"
+            : (r.metadataMatch ==
+                    MetadataMatch::NonNull
+                ? "nonnull"
+                : "any");
+
+        AppendFormat(
+            json,
+            capacity,
+            used,
+            "    {"
+            "\"caller_rva\":\"0x%llx\","
+            "\"format\":%d,"
+            "\"metadata\":\"%s\","
+            "\"action\":\"%s\""
+            "}%s\n",
+            static_cast<unsigned long long>(
+                r.callerRva
+            ),
+            r.format,
+            metadataName,
+            ActionName(r.action),
+            (i + 1 < c.ruleCount)
+                ? ","
+                : ""
+        );
+    }
+
+    AppendFormat(
+        json,
+        capacity,
+        used,
+        "  ],\n"
         "  \"error\": \"%s\"\n"
         "}\n",
-        GetCurrentProcessId(),
-        ReadLong(&g_hookInstalled) ? "true" : "false",
-        g_signature,
-        ReadLong(&g_DH_RuntimeEnabled) ? "true" : "false",
-        DetectionModeName(mode),
-        static_cast<double>(white),
-        static_cast<double>(peak),
-        sourceIsHdr < 0
-            ? "null"
-            : (sourceIsHdr ? "true" : "false"),
-        DecisionName(decision),
-        format,
-        FormatName(format),
-        originalPrimaries,
-        PrimariesName(originalPrimaries),
-        originalTransfer,
-        TransferName(originalTransfer),
-        effectivePrimaries,
-        PrimariesName(effectivePrimaries),
-        effectiveTransfer,
-        TransferName(effectiveTransfer),
-        ReadCounter(&g_DH_RendererCalls),
-        ReadCounter(&g_DH_DisabledBypassFrames),
-        ReadCounter(&g_DH_SdrFramesBypassed),
-        ReadCounter(&g_DH_HdrFramesCorrected),
-        ReadCounter(&g_DH_Hdr10Frames),
-        ReadCounter(&g_DH_ScRgbFrames),
-        ReadCounter(&g_DH_HdrUnknownFormatFrames),
-        ReadCounter(&g_DH_MetadataInjected),
-        ReadCounter(&g_DH_SourceColorOverrides),
-        originalMetadataNull < 0
-            ? "null"
-            : (originalMetadataNull ? "true" : "false"),
         g_error
     );
 
     wchar_t tempPath[MAX_PATH]{};
-    swprintf_s(tempPath, L"%s.tmp", g_statusPath);
+
+    swprintf_s(
+        tempPath,
+        L"%s.tmp",
+        g_statusPath
+    );
 
     HANDLE f = CreateFileW(
         tempPath,
@@ -811,7 +1768,9 @@ void WriteStatus() {
     WriteFile(
         f,
         json,
-        static_cast<DWORD>(std::strlen(json)),
+        static_cast<DWORD>(
+            std::strlen(json)
+        ),
         &written,
         nullptr
     );
@@ -822,34 +1781,58 @@ void WriteStatus() {
     MoveFileExW(
         tempPath,
         g_statusPath,
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+        MOVEFILE_REPLACE_EXISTING |
+        MOVEFILE_WRITE_THROUGH
     );
+}
+
+
+bool GetConfigWriteTime(FILETIME& time) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+
+    if (!GetFileAttributesExW(
+            g_configPath,
+            GetFileExInfoStandard,
+            &data)) {
+        return false;
+    }
+
+    time = data.ftLastWriteTime;
+    return true;
 }
 
 DWORD WINAPI WorkerThread(void*) {
     BuildPaths();
 
-    StoreFloatBits(&g_whiteBits, 460.0f);
-    StoreFloatBits(&g_peakBits, 1000.0f);
+    PublishConfig(
+        new RuntimeConfig()
+    );
 
-    Config initial = ReadConfig();
-    PublishConfig(initial);
+    SetSignature(
+        "waiting for discord_voice.node"
+    );
 
-    SetSignature("waiting for discord_voice.node");
     SetError("");
-    WriteStatus();
+    SetConfigError("");
 
     HMODULE voice = nullptr;
 
     for (int i = 0; i < 3000; ++i) {
-        voice = GetModuleHandleW(L"discord_voice.node");
+        voice = GetModuleHandleW(
+            L"discord_voice.node"
+        );
+
         if (voice)
             break;
+
         Sleep(100);
     }
 
     if (!voice) {
-        SetError("discord_voice.node was not loaded within 300 seconds");
+        SetError(
+            "discord_voice.node did not load within 300 seconds"
+        );
+
         WriteStatus();
         return 0;
     }
@@ -859,27 +1842,46 @@ DWORD WINAPI WorkerThread(void*) {
         return 0;
     }
 
-    if (!PatchVideoHookCall(voice)) {
+    if (!PatchRendererEntry(voice)) {
         WriteStatus();
         return 0;
     }
 
-    InterlockedExchange(&g_hookInstalled, 1);
-    SetError("");
-    WriteStatus();
+    InterlockedExchange(
+        &g_hookInstalled,
+        1
+    );
 
-    Config previous = CurrentConfig();
+    SetSignature(
+        "shared renderer dev host installed"
+    );
+
+    SetError("");
+
+    FILETIME lastConfigWrite{};
+    bool haveConfigWrite = false;
 
     for (;;) {
-        const Config latest = ReadConfig();
+        FILETIME currentWrite{};
 
-        if (ConfigChanged(latest, previous)) {
-            PublishConfig(latest);
-            previous = CurrentConfig();
+        if (GetConfigWriteTime(currentWrite)) {
+            if (!haveConfigWrite ||
+                CompareFileTime(
+                    &currentWrite,
+                    &lastConfigWrite) != 0) {
+                RuntimeConfig* next =
+                    ReadConfig();
+
+                if (next) {
+                    PublishConfig(next);
+                    lastConfigWrite = currentWrite;
+                    haveConfigWrite = true;
+                }
+            }
         }
 
         WriteStatus();
-        Sleep(500);
+        Sleep(250);
     }
 }
 
@@ -888,8 +1890,11 @@ BOOL WINAPI DllMain(
     DWORD reason,
     LPVOID
 ) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(instance);
+    if (reason ==
+        DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(
+            instance
+        );
 
         HANDLE thread = CreateThread(
             nullptr,

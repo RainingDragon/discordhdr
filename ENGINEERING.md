@@ -1,70 +1,85 @@
-# DiscordHDRFix v1.0.1 automatic detection engineering notes
+# DiscordHDRFix v1.1.0 engineering notes
 
-## Exact target
+## Stable hook
 
-`discord_voice.node` SHA-256:
-
-```text
-54d452eefb5bd20f022dca1f93e3a92cf641e14283761720e4276f3fb0585db9
-```
-
-## Existing Video Hook callsite
+Target:
 
 ```text
-RVA 0x003fcdca: mov r12, rdx
-...
-RVA 0x003fd443: mov qword ptr [rsp+0x40], 0
-RVA 0x003fd454: lea r9, [rsp+0x318]
-RVA 0x003fd462: call renderer
-RVA 0x003fd467: return address
+discord_voice.node + 0x52cad0
 ```
 
-Thus at the patched CALL relay entry:
+The host verifies the exact PE timestamp, image size, and the 16-byte shared
+renderer prologue before patching.
+
+The detour jumps directly into a typed Microsoft x64 ABI hook with the same
+nine-argument signature as Discord's renderer wrapper.
+
+`_ReturnAddress()` therefore resolves the original native renderer caller RVA
+without needing caller-specific register assumptions.
+
+## Trampoline
+
+The trampoline replays the exact 16-byte original renderer prologue and then
+jumps to `renderer+16`.
+
+The typed hook calls that trampoline, allowing the host to restore temporary
+source color bytes after Discord's renderer returns.
+
+## Source descriptor handling
+
+Known renderer fields:
 
 ```text
-r12       = WumpusFrame*
-r9        = renderer source descriptor
-[rsp+48h] = ninth renderer arg (HDR metadata) after CALL pushed return address
++0x178 DXGI_FORMAT
++0x17c primaries/gamut
++0x17d transfer
 ```
 
-## `is_source_hdr`
+Reads and writes are guarded with SEH. The shared renderer itself consumes
+these fields, but the guard prevents a diagnostic rule from crashing Discord
+if a future path supplies an unexpected object.
 
-The WumpusFrame serde field set includes:
+## Config hot reload
+
+File:
 
 ```text
-cursor
-surface
-region
-timestamp
-capture_subtype
-is_source_hdr
+%LOCALAPPDATA%\DiscordHDRFix\host.cfg
 ```
 
-The final bool field resolves to:
+Polled every 250 ms.
+
+The Vencord helper writes via temp-file + atomic rename.
+
+Published `RuntimeConfig` objects are immutable and atomically swapped. Old
+snapshots are intentionally retained for the Discord process lifetime so a
+render thread can never observe freed rule memory.
+
+## Rule grammar
 
 ```text
-WumpusFrame + 0x1da
+callerRva,format|any,metadata(any|null|nonnull),action
 ```
 
-An independent consumer in the exact binary reads it at RVA `0x005ddaa1`:
+Examples:
 
-```asm
-movzx eax, byte ptr [r13+0x1da]
+```text
+0x3fd467,24,null,hdr10
+0x4abcde,10,any,scrgb
+0x123456,any,nonnull,preserve
 ```
 
-v1.0.1 verifies that exact instruction before patching.
+Actions:
 
-## Direct assembly relay
+```text
+preserve
+sdr
+hdr10
+scrgb
+metadata
+```
 
-Unlike v1.0.0's typed C++ renderer hook, v1.0.1 uses a small MASM leaf relay so
-the original Video Hook `r12` register is available directly.
+## Current default
 
-The relay:
-
-1. Records `is_source_hdr`.
-2. In Automatic mode, bypasses SDR completely.
-3. Corrects only HDR frames.
-4. Tail-jumps to Discord's existing renderer.
-5. Does not change RSP and does not make another call.
-
-No capture copy, CPU readback, extra encoder, mirror window, or audio changes.
+Observe only. This deliberately combines path discovery and correction into one
+native build without prematurely guessing the AutoHDR caller.

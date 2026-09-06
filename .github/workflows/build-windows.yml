@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix v1.0.1 Auto Test Windows x64
+name: Build DiscordHDRFix v1.1.0 Dev Host Windows x64
 
 on:
   workflow_dispatch:
@@ -19,23 +19,21 @@ permissions:
 
 jobs:
   build-windows-x64:
-    name: Windows x64
     runs-on: windows-2022
     timeout-minutes: 15
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure native build
+      - name: Configure
         shell: pwsh
         run: cmake -S native -B build -A x64
 
-      - name: Compile Release binaries
+      - name: Build
         shell: pwsh
         run: cmake --build build --config Release --parallel
 
-      - name: Verify outputs
+      - name: Verify
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -43,23 +41,17 @@ jobs:
           $injector = "build\Release\DiscordHDRFix.Injector.exe"
           $dll = "build\Release\DiscordHDRFix.Native.dll"
 
-          if (-not (Test-Path $injector)) {
-            throw "Missing $injector"
-          }
+          if (-not (Test-Path $injector)) { throw "Missing $injector" }
+          if (-not (Test-Path $dll)) { throw "Missing $dll" }
 
-          if (-not (Test-Path $dll)) {
-            throw "Missing $dll"
-          }
+          Get-Item $injector, $dll | Format-Table Name, Length, LastWriteTime
 
-          Get-Item $injector, $dll |
-            Format-Table Name, Length, LastWriteTime
-
-      - name: Stage test package
+      - name: Stage package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v1.0.1-auto-test"
+          $root = "package\DiscordHDRFix-v1.1.0-devhost"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -89,10 +81,10 @@ jobs:
             } |
             Set-Content -Encoding ascii (Join-Path $root "SHA256SUMS.txt")
 
-      - name: Upload Windows x64 artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v1.0.1-auto-test-windows-x64
-          path: package/DiscordHDRFix-v1.0.1-auto-test
+          name: DiscordHDRFix-v1.1.0-devhost-windows-x64
+          path: package/DiscordHDRFix-v1.1.0-devhost
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30

@@ -1,39 +1,42 @@
-# DiscordHDRFix v1.0.1 Auto Test — compiled artifact
-
-Do not hand this to another user as the final release yet. This build validates
-automatic HDR/SDR detection.
+# DiscordHDRFix v1.1.0 Dev Host — compiled artifact
 
 ## Install
 
-Fully exit Discord, then:
+Fully exit Discord:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\Install-DiscordHDRFix.ps1
 ```
 
-Replace/rebuild the Vencord plugin if the installer does not find your Vencord
-checkout automatically.
+If needed:
 
-## Required settings
-
-```text
-Correction enabled: ON
-Detection mode: Automatic
-SDR white: 460
-Input max: 1000
+```powershell
+.\Install-DiscordHDRFix.ps1 -VencordPath "C:\path\to\Vencord"
 ```
 
-## Test both
+## First run
 
-1. Native HDR game.
-2. Slay the Spire 2 with Windows AutoHDR OFF.
+Leave:
 
-After each stream, use:
+```text
+Mode: Observe only
+Trace: ON
+SDR white: 460
+Input max: 1000
+Rules: empty
+```
+
+Start a stream, wait several seconds, then:
 
 ```text
 Vencord Toolbox
--> Show Native HDR Fix Status
+-> Show Native Dev Host Status
 ```
 
-Send the full status.
+The status lists recent renderer caller RVAs.
+
+After we identify a caller, you can add/change a rule in Vencord and press
+`Apply Dev Host Settings`. The DLL reloads it in roughly 250 ms.
+
+No rebuild or Discord restart is required.

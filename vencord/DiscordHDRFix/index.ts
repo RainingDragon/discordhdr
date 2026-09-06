@@ -18,63 +18,86 @@ const captureState = {
     effectiveVideoHook: undefined as unknown
 };
 
-async function pushNativeConfig(): Promise<void> {
+async function pushHostConfig(): Promise<void> {
     try {
-        await Native.writeToneMapConfig(
-            settings.store.correctionEnabled,
+        const result = await Native.writeHostConfig(
+            settings.store.enabled,
+            settings.store.traceEnabled,
+            settings.store.hostMode,
             settings.store.sdrWhiteLevel,
             settings.store.inputMaxLuminance,
-            settings.store.detectionMode
+            settings.store.rules
         );
+
+        if (!result?.ok)
+            logger.error("Failed to write dev-host config:", result);
     } catch (error) {
-        logger.error("Failed to update HDR runtime config:", error);
+        logger.error("Failed to write dev-host config:", error);
     }
 }
 
-async function startNativeFix(): Promise<void> {
+async function startNativeHost(): Promise<void> {
     try {
-        await pushNativeConfig();
+        await pushHostConfig();
+
         const result = await Native.startNativeFix();
+
         if (!result?.ok)
-            logger.error("Native HDR fix launch failed:", result);
+            logger.error("Native dev host launch failed:", result);
     } catch (error) {
-        logger.error("Failed to launch native HDR fix:", error);
+        logger.error("Failed to launch native dev host:", error);
     }
 }
 
 const settings = definePluginSettings({
-    correctionEnabled: {
+    enabled: {
         type: OptionType.BOOLEAN,
-        description: "Enable DiscordHDRFix. Automatic mode bypasses SDR frames and corrects only frames Discord marks as HDR.",
+        description: "Master switch for runtime correction actions. Tracing can remain enabled while correction is disabled.",
         default: true,
         restartNeeded: false,
-        onChange: () => void pushNativeConfig()
+        onChange: () => void pushHostConfig()
     },
-    detectionMode: {
+    hostMode: {
         type: OptionType.SELECT,
-        description: "Automatic is recommended. Manual modes are only for troubleshooting a game that Discord classifies incorrectly.",
+        description: "Observe is safest. Rules applies only matching caller rules. Force modes are live diagnostics.",
         options: [
-            { label: "Automatic (recommended)", value: "automatic", default: true },
-            { label: "Force SDR / no tone mapping", value: "forceSdr" },
-            { label: "Force HDR10 / Rec.2020 + PQ", value: "forceHdr10" },
-            { label: "Force scRGB / Rec.709 + Linear", value: "forceScRgb" }
+            { label: "Observe only (no correction)", value: "observe", default: true },
+            { label: "Caller rules", value: "rules" },
+            { label: "Force SDR / preserve", value: "force_sdr" },
+            { label: "Force HDR10 / Rec.2020 + PQ", value: "force_hdr10" },
+            { label: "Force scRGB / Rec.709 + Linear", value: "force_scrgb" },
+            { label: "Metadata only", value: "metadata_only" }
         ],
         restartNeeded: false,
-        onChange: () => void pushNativeConfig()
+        onChange: () => void pushHostConfig()
+    },
+    traceEnabled: {
+        type: OptionType.BOOLEAN,
+        description: "Record the most recent renderer callers and their source format/color metadata.",
+        default: true,
+        restartNeeded: false,
+        onChange: () => void pushHostConfig()
     },
     sdrWhiteLevel: {
         type: OptionType.NUMBER,
-        description: "HDR-to-SDR reference white passed to Discord's native HDR shader. Tested baseline: 460.",
+        description: "Runtime HDR-to-SDR white level. Tested baseline: 460.",
         default: 460,
         restartNeeded: false,
-        onChange: () => void pushNativeConfig()
+        onChange: () => void pushHostConfig()
     },
     inputMaxLuminance: {
         type: OptionType.NUMBER,
-        description: "HDR input maximum luminance passed to Discord's native HDR shader. Tested baseline: 1000.",
+        description: "Runtime HDR input maximum. Tested baseline: 1000.",
         default: 1000,
         restartNeeded: false,
-        onChange: () => void pushNativeConfig()
+        onChange: () => void pushHostConfig()
+    },
+    rules: {
+        type: OptionType.STRING,
+        description: "Live rules: callerRva,format|any,metadata(any|null|nonnull),action(preserve|sdr|hdr10|scrgb|metadata). Separate rules with semicolons. Example: 0x3fd467,24,null,hdr10",
+        default: "",
+        restartNeeded: false,
+        onChange: () => void pushHostConfig()
     }
 });
 
@@ -86,13 +109,8 @@ function fmt(value: unknown): string {
 
 function captureStatus(): string {
     return [
-        "DiscordHDRFix capture status v1.0.1-auto-test",
-        "---------------------------------------------",
-        `Correction enabled:              ${settings.store.correctionEnabled}`,
-        `Detection mode:                  ${settings.store.detectionMode}`,
-        `SDR white level:                 ${settings.store.sdrWhiteLevel}`,
-        `Input max luminance:             ${settings.store.inputMaxLuminance}`,
-        "",
+        "DiscordHDRFix capture routing v1.1.0-devhost",
+        "--------------------------------------------",
         `Original HDR mode:               ${fmt(captureState.originalHdr)}`,
         `Effective HDR mode:              ${fmt(captureState.effectiveHdr)}`,
         `Original Graphics Capture:       ${fmt(captureState.originalGraphicsCapture)}`,
@@ -113,25 +131,25 @@ async function nativeStatusText(): Promise<string> {
 
         if (result == null) {
             return [
-                "DiscordHDRFix native status v1.0.1-auto-test",
-                "------------------------------------------------",
-                "No v1.0.1 status file found yet."
+                "DiscordHDRFix native dev host v1.1.0",
+                "-----------------------------------",
+                "No dev-host status file found yet."
             ].join("\n");
         }
 
         return [
-            "DiscordHDRFix native status v1.0.1-auto-test",
-            "------------------------------------------------",
+            "DiscordHDRFix native dev host v1.1.0",
+            "-----------------------------------",
             JSON.stringify(result, null, 2)
         ].join("\n");
     } catch (error) {
-        return `DiscordHDRFix native status v1.0.1-auto-test\n------------------------------------------------\nFailed to read status: ${String(error)}`;
+        return `DiscordHDRFix native dev host v1.1.0\n-----------------------------------\nFailed to read status: ${String(error)}`;
     }
 }
 
 export default definePlugin({
     name: "DiscordHDRFix",
-    description: "Automatically bypasses SDR frames and corrects Discord Video Hook HDR color/tone mapping.",
+    description: "Hot-reload HDR/SDR tracing and correction host for Discord Video Hook development.",
     authors: [{ name: "Discord HDR Fix", id: 0n }],
     tags: ["Developers", "Voice"],
     settings,
@@ -194,10 +212,10 @@ export default definePlugin({
     },
 
     toolboxActions: {
-        "Apply HDR Runtime Settings": () => void pushNativeConfig(),
-        "Start Native HDR Fix": () => void startNativeFix(),
-        "Show Native HDR Fix Status": () => void nativeStatusText().then(text => alert(text)),
-        "Copy Combined HDR Fix Status": () => {
+        "Apply Dev Host Settings": () => void pushHostConfig(),
+        "Start Native Dev Host": () => void startNativeHost(),
+        "Show Native Dev Host Status": () => void nativeStatusText().then(text => alert(text)),
+        "Copy Combined Dev Host Status": () => {
             void nativeStatusText().then(native => {
                 const text = `${captureStatus()}\n\n${native}`;
                 void navigator.clipboard.writeText(text).catch(() => alert(text));
@@ -210,11 +228,11 @@ export default definePlugin({
             captureStatus,
             captureState,
             nativeStatus: () => Native.readNativeStatus(),
-            apply: () => pushNativeConfig(),
-            startNativeFix: () => startNativeFix()
+            apply: () => pushHostConfig(),
+            startNativeHost: () => startNativeHost()
         };
 
-        setTimeout(() => void startNativeFix(), 1500);
+        setTimeout(() => void startNativeHost(), 1500);
     },
 
     stop(): void {
