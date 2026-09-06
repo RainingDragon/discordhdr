@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix v1.1.0 Dev Host Windows x64
+name: Build DiscordHDRFix v1.1.1 Flexible Source Windows x64
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v1.1.0-devhost"
+          $root = "package\DiscordHDRFix-v1.1.1-flex-source"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -84,7 +84,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v1.1.0-devhost-windows-x64
-          path: package/DiscordHDRFix-v1.1.0-devhost
+          name: DiscordHDRFix-v1.1.1-flex-source-windows-x64
+          path: package/DiscordHDRFix-v1.1.1-flex-source
           if-no-files-found: error
           retention-days: 30

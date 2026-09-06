@@ -59,6 +59,9 @@ trace=1
 mode=observe
 sdr_white=460
 input_max=1000
+custom_primaries=-1
+custom_transfer=-1
+custom_metadata=0
 rules=
 "@ | Set-Content -Encoding ascii $ConfigPath
 }
@@ -123,7 +126,7 @@ finally {
 }
 
 Write-Host ""
-Write-Host "DiscordHDRFix v1.1.0 dev host installed." -ForegroundColor Green
+Write-Host "DiscordHDRFix v1.1.1 flex-source host installed." -ForegroundColor Green
 Write-Host "Start Discord and enable the DiscordHDRFix plugin."
 Write-Host ""
 Write-Host "Default mode is Observe only."

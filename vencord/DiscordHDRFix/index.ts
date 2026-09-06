@@ -26,6 +26,9 @@ async function pushHostConfig(): Promise<void> {
             settings.store.hostMode,
             settings.store.sdrWhiteLevel,
             settings.store.inputMaxLuminance,
+            settings.store.customPrimaries,
+            settings.store.customTransfer,
+            settings.store.customMetadata,
             settings.store.rules
         );
 
@@ -66,7 +69,8 @@ const settings = definePluginSettings({
             { label: "Force SDR / preserve", value: "force_sdr" },
             { label: "Force HDR10 / Rec.2020 + PQ", value: "force_hdr10" },
             { label: "Force scRGB / Rec.709 + Linear", value: "force_scrgb" },
-            { label: "Metadata only", value: "metadata_only" }
+            { label: "Metadata only", value: "metadata_only" },
+            { label: "Custom source interpretation", value: "custom" }
         ],
         restartNeeded: false,
         onChange: () => void pushHostConfig()
@@ -92,9 +96,44 @@ const settings = definePluginSettings({
         restartNeeded: false,
         onChange: () => void pushHostConfig()
     },
+    customPrimaries: {
+        type: OptionType.SELECT,
+        description: "Custom mode only. Override source gamut/primaries independently of the transfer function.",
+        options: [
+            { label: "Preserve Discord value", value: "preserve", default: true },
+            { label: "Rec.709", value: "rec709" },
+            { label: "Rec.2020", value: "rec2020" },
+            { label: "Arc", value: "arc" }
+        ],
+        restartNeeded: false,
+        onChange: () => void pushHostConfig()
+    },
+    customTransfer: {
+        type: OptionType.SELECT,
+        description: "Custom mode only. Override the source transfer function independently of gamut.",
+        options: [
+            { label: "Preserve Discord value", value: "preserve", default: true },
+            { label: "Linear", value: "linear" },
+            { label: "sRGB", value: "srgb" },
+            { label: "ST.2084 / PQ", value: "pq" }
+        ],
+        restartNeeded: false,
+        onChange: () => void pushHostConfig()
+    },
+    customMetadata: {
+        type: OptionType.SELECT,
+        description: "Custom mode only. Preserve Discord metadata, remove it, or inject the 460/1000 HDR metadata object.",
+        options: [
+            { label: "Preserve Discord metadata", value: "preserve", default: true },
+            { label: "No HDR metadata", value: "none" },
+            { label: "Inject HDR metadata", value: "inject" }
+        ],
+        restartNeeded: false,
+        onChange: () => void pushHostConfig()
+    },
     rules: {
         type: OptionType.STRING,
-        description: "Live rules: callerRva,format|any,metadata(any|null|nonnull),action(preserve|sdr|hdr10|scrgb|metadata). Separate rules with semicolons. Example: 0x3fd467,24,null,hdr10",
+        description: "Live rules: callerRva,format|any,metadata(any|null|nonnull),action(preserve|sdr|hdr10|scrgb|metadata|custom). Separate rules with semicolons. Example: 0x3fd467,24,null,hdr10",
         default: "",
         restartNeeded: false,
         onChange: () => void pushHostConfig()
@@ -109,7 +148,7 @@ function fmt(value: unknown): string {
 
 function captureStatus(): string {
     return [
-        "DiscordHDRFix capture routing v1.1.0-devhost",
+        "DiscordHDRFix capture routing v1.1.1-flex-source",
         "--------------------------------------------",
         `Original HDR mode:               ${fmt(captureState.originalHdr)}`,
         `Effective HDR mode:              ${fmt(captureState.effectiveHdr)}`,
@@ -131,19 +170,19 @@ async function nativeStatusText(): Promise<string> {
 
         if (result == null) {
             return [
-                "DiscordHDRFix native dev host v1.1.0",
+                "DiscordHDRFix native dev host v1.1.1",
                 "-----------------------------------",
                 "No dev-host status file found yet."
             ].join("\n");
         }
 
         return [
-            "DiscordHDRFix native dev host v1.1.0",
+            "DiscordHDRFix native dev host v1.1.1",
             "-----------------------------------",
             JSON.stringify(result, null, 2)
         ].join("\n");
     } catch (error) {
-        return `DiscordHDRFix native dev host v1.1.0\n-----------------------------------\nFailed to read status: ${String(error)}`;
+        return `DiscordHDRFix native dev host v1.1.1\n-----------------------------------\nFailed to read status: ${String(error)}`;
     }
 }
 

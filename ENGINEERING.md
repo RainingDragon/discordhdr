@@ -83,3 +83,18 @@ metadata
 
 Observe only. This deliberately combines path discovery and correction into one
 native build without prematurely guessing the AutoHDR caller.
+
+
+## v1.1.1 flexible source interpretation
+
+The renderer already exposes orthogonal source primaries and transfer enums at descriptor offsets `+0x17c` and `+0x17d`. v1.1.1 stops treating the existing presets as the only legal combinations.
+
+Custom mode can independently preserve/override:
+
+```text
+primaries: preserve / Rec709 / Rec2020 / Arc
+transfer:  preserve / Linear / sRGB / ST2084
+metadata:  preserve / null / injected 12-byte metadata
+```
+
+This is still metadata/interpretation testing only; it does not add a new GPU pixel shader.

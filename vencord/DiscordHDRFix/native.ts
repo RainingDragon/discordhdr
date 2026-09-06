@@ -56,6 +56,9 @@ export async function writeHostConfig(
     hostMode: string,
     sdrWhiteLevel: number,
     inputMaxLuminance: number,
+    customPrimaries: string,
+    customTransfer: string,
+    customMetadata: string,
     rules: string
 ) {
     await mkdir(installDir(), { recursive: true });
@@ -76,10 +79,35 @@ export async function writeHostConfig(
         "force_sdr",
         "force_hdr10",
         "force_scrgb",
-        "metadata_only"
+        "metadata_only",
+        "custom"
     ].includes(hostMode)
         ? hostMode
         : "observe";
+
+    const primariesMap: Record<string, number> = {
+        preserve: -1,
+        rec709: 0,
+        rec2020: 1,
+        arc: 2
+    };
+
+    const transferMap: Record<string, number> = {
+        preserve: -1,
+        linear: 0,
+        srgb: 1,
+        pq: 2
+    };
+
+    const metadataMap: Record<string, number> = {
+        preserve: 0,
+        none: 1,
+        inject: 2
+    };
+
+    const customPrimariesValue = primariesMap[customPrimaries] ?? -1;
+    const customTransferValue = transferMap[customTransfer] ?? -1;
+    const customMetadataValue = metadataMap[customMetadata] ?? 0;
 
     const safeRules = String(rules ?? "")
         .replace(/[\r\n]+/g, " ")
@@ -91,6 +119,9 @@ export async function writeHostConfig(
         `mode=${safeMode}`,
         `sdr_white=${white}`,
         `input_max=${peak}`,
+        `custom_primaries=${customPrimariesValue}`,
+        `custom_transfer=${customTransferValue}`,
+        `custom_metadata=${customMetadataValue}`,
         `rules=${safeRules}`,
         ""
     ].join("\n");
@@ -109,6 +140,9 @@ export async function writeHostConfig(
         hostMode: safeMode,
         sdrWhiteLevel: white,
         inputMaxLuminance: peak,
+        customPrimaries,
+        customTransfer,
+        customMetadata,
         rules: safeRules
     };
 }

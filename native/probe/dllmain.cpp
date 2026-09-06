@@ -35,7 +35,8 @@ enum class HostMode : int {
     ForceSdr = 2,
     ForceHdr10 = 3,
     ForceScRgb = 4,
-    MetadataOnly = 5
+    MetadataOnly = 5,
+    Custom = 6
 };
 
 enum class Action : int {
@@ -43,7 +44,14 @@ enum class Action : int {
     Sdr = 1,
     Hdr10 = 2,
     ScRgb = 3,
-    MetadataOnly = 4
+    MetadataOnly = 4,
+    Custom = 5
+};
+
+enum class CustomMetadataPolicy : int {
+    Preserve = 0,
+    None = 1,
+    Inject = 2
 };
 
 enum class MetadataMatch : int {
@@ -75,6 +83,13 @@ struct RuntimeConfig {
     HostMode mode = HostMode::Observe;
     float sdrWhite = 460.0f;
     float inputMax = 1000.0f;
+
+    // Orthogonal live source interpretation controls used by HostMode::Custom
+    // and Action::Custom. -1 means preserve Discord's original enum.
+    int customPrimaries = -1; // 0=Rec709, 1=Rec2020, 2=Arc
+    int customTransfer = -1;  // 0=Linear, 1=sRGB, 2=ST2084/PQ
+    CustomMetadataPolicy customMetadata = CustomMetadataPolicy::Preserve;
+
     std::size_t ruleCount = 0;
     Rule rules[kMaxRules]{};
 };
@@ -168,6 +183,7 @@ const char* HostModeName(HostMode mode) {
     case HostMode::ForceHdr10: return "force_hdr10";
     case HostMode::ForceScRgb: return "force_scrgb";
     case HostMode::MetadataOnly: return "metadata_only";
+    case HostMode::Custom: return "custom";
     default: return "observe";
     }
 }
@@ -179,6 +195,7 @@ const char* ActionName(Action action) {
     case Action::Hdr10: return "hdr10_rec2020_pq";
     case Action::ScRgb: return "scrgb_rec709_linear";
     case Action::MetadataOnly: return "metadata_only";
+    case Action::Custom: return "custom";
     default: return "preserve";
     }
 }
@@ -489,6 +506,9 @@ Action SelectAction(
     case HostMode::MetadataOnly:
         return Action::MetadataOnly;
 
+    case HostMode::Custom:
+        return Action::Custom;
+
     case HostMode::Rules:
         break;
 
@@ -720,6 +740,61 @@ void* __fastcall HookRenderer(
             &g_totalMetadataInjected
         );
     }
+    else if (action == Action::Custom) {
+        if (sourceReadable) {
+            const int desiredPrimaries =
+                cfg.customPrimaries >= 0
+                    ? cfg.customPrimaries
+                    : originalPrimaries;
+
+            const int desiredTransfer =
+                cfg.customTransfer >= 0
+                    ? cfg.customTransfer
+                    : originalTransfer;
+
+            if (desiredPrimaries != originalPrimaries ||
+                desiredTransfer != originalTransfer) {
+                sourceChanged =
+                    SafeWriteSource(
+                        a4,
+                        static_cast<std::uint8_t>(desiredPrimaries),
+                        static_cast<std::uint8_t>(desiredTransfer)
+                    );
+
+                if (sourceChanged) {
+                    effectivePrimaries = desiredPrimaries;
+                    effectiveTransfer = desiredTransfer;
+
+                    InterlockedIncrement64(
+                        &g_totalSourceOverrides
+                    );
+                }
+            }
+        }
+
+        switch (cfg.customMetadata) {
+        case CustomMetadataPolicy::None:
+            effectiveMetadata = nullptr;
+            break;
+
+        case CustomMetadataPolicy::Inject:
+            effectiveMetadata =
+                PublishMetadata(
+                    cfg.sdrWhite,
+                    cfg.inputMax
+                );
+
+            InterlockedIncrement64(
+                &g_totalMetadataInjected
+            );
+            break;
+
+        case CustomMetadataPolicy::Preserve:
+        default:
+            effectiveMetadata = a9;
+            break;
+        }
+    }
 
     if (action != Action::Preserve) {
         InterlockedIncrement64(
@@ -870,6 +945,9 @@ HostMode ParseHostMode(const char* value) {
     if (_stricmp(value, "metadata_only") == 0)
         return HostMode::MetadataOnly;
 
+    if (_stricmp(value, "custom") == 0)
+        return HostMode::Custom;
+
     return HostMode::Observe;
 }
 
@@ -885,6 +963,9 @@ Action ParseAction(const char* value) {
 
     if (_stricmp(value, "metadata") == 0)
         return Action::MetadataOnly;
+
+    if (_stricmp(value, "custom") == 0)
+        return Action::Custom;
 
     return Action::Preserve;
 }
@@ -1193,6 +1274,42 @@ RuntimeConfig* ReadConfig() {
                     floatValue,
                     100.0f,
                     10000.0f
+                );
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "custom_primaries=%d",
+                &intValue) == 1) {
+            cfg->customPrimaries =
+                (intValue >= -1 && intValue <= 2)
+                    ? intValue
+                    : -1;
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "custom_transfer=%d",
+                &intValue) == 1) {
+            cfg->customTransfer =
+                (intValue >= -1 && intValue <= 2)
+                    ? intValue
+                    : -1;
+            continue;
+        }
+
+        if (sscanf_s(
+                line,
+                "custom_metadata=%d",
+                &intValue) == 1) {
+            if (intValue < 0 || intValue > 2)
+                intValue = 0;
+
+            cfg->customMetadata =
+                static_cast<CustomMetadataPolicy>(
+                    intValue
                 );
             continue;
         }
@@ -1512,6 +1629,12 @@ void WriteStatus() {
         "  \"trace_enabled\": %s,\n"
         "  \"sdr_white_level\": %.3f,\n"
         "  \"input_max_luminance\": %.3f,\n"
+        "  \"custom_primaries\": %d,\n"
+        "  \"custom_primaries_name\": \"%s\",\n"
+        "  \"custom_transfer\": %d,\n"
+        "  \"custom_transfer_name\": \"%s\",\n"
+        "  \"custom_metadata\": %d,\n"
+        "  \"custom_metadata_name\": \"%s\",\n"
         "  \"rules_loaded\": %zu,\n"
         "  \"config_error\": \"%s\",\n"
         "  \"total_renderer_calls\": %llu,\n"
@@ -1554,6 +1677,20 @@ void WriteStatus() {
         static_cast<double>(
             c.inputMax
         ),
+        c.customPrimaries,
+        c.customPrimaries < 0
+            ? "preserve"
+            : PrimariesName(c.customPrimaries),
+        c.customTransfer,
+        c.customTransfer < 0
+            ? "preserve"
+            : TransferName(c.customTransfer),
+        static_cast<int>(c.customMetadata),
+        c.customMetadata == CustomMetadataPolicy::None
+            ? "none"
+            : (c.customMetadata == CustomMetadataPolicy::Inject
+                ? "inject"
+                : "preserve"),
         c.ruleCount,
         g_configError,
         ReadCounter(

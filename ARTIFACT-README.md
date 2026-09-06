@@ -1,42 +1,22 @@
-# DiscordHDRFix v1.1.0 Dev Host — compiled artifact
+# DiscordHDRFix v1.1.1 Flexible Source Interpretation
 
-## Install
+Install the compiled Actions artifact as usual.
 
-Fully exit Discord:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\Install-DiscordHDRFix.ps1
-```
-
-If needed:
-
-```powershell
-.\Install-DiscordHDRFix.ps1 -VencordPath "C:\path\to\Vencord"
-```
-
-## First run
-
-Leave:
+For Dawnwalker/RenoDX:
 
 ```text
-Mode: Observe only
-Trace: ON
+Host mode: Custom source interpretation
 SDR white: 460
 Input max: 1000
-Rules: empty
 ```
 
-Start a stream, wait several seconds, then:
+Test the new Primaries / Transfer / HDR metadata dropdowns live. No restart or restream is required.
 
-```text
-Vencord Toolbox
--> Show Native Dev Host Status
-```
+Start with metadata = Inject and compare:
 
-The status lists recent renderer caller RVAs.
+1. Rec.2020 + sRGB
+2. Rec.709 + PQ
+3. Rec.2020 + Linear
+4. Rec.709 + sRGB
 
-After we identify a caller, you can add/change a rule in Vencord and press
-`Apply Dev Host Settings`. The DLL reloads it in roughly 250 ms.
-
-No rebuild or Discord restart is required.
+Use `Show Native Dev Host Status` to verify the effective values changed.
