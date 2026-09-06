@@ -1,21 +1,18 @@
-# DiscordHDRFix v1.2.1 Discord UI
+# DiscordHDRFix v1.2.2 Stream UI Fix
 
-Install as usual with Discord fully closed:
+Install normally, then stream an application and open Discord's Go Live menu.
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\Install-DiscordHDRFix.ps1
+You should now always see:
+
+```text
+Discord HDR Fix  >
 ```
 
-## Test
+If Discord has not yet reported the selected source it will temporarily say:
 
-1. Start Discord and stream an application.
-2. Open Discord's normal Go Live stream menu.
-3. You should see a single `Discord HDR Fix` row rather than a large embedded form.
-4. Hover it for quick profile selection.
-5. Click it for the full non-modal per-app editor.
-6. Click elsewhere in Discord; the full editor should close.
-7. Open Vencord -> Plugins -> DiscordHDRFix settings to edit profiles there too.
+```text
+Detecting active stream…
+```
 
-RenoDX / ReShade is customizable per application. Its 360 / 200 starting values
-do not affect native HDR profiles.
+This build uses both the v1.2.0 direct Go Live source hook and the v1.2.1 runtime
+MediaEngine hook, so the row no longer depends on only one source-detection path.

@@ -1,22 +1,12 @@
-DiscordHDRFix v1.2.1 DISCORD-STYLE UI
-=========================================
+DiscordHDRFix v1.2.2 STREAM UI FIX
+====================================
 
-New stream-menu UX:
+Fix:
+  v1.2.1 could omit the Discord HDR Fix row if its runtime source hook did not
+  resolve the active stream.
 
-  HOVER Discord HDR Fix
-    -> quick profile flyout
-
-  CLICK Discord HDR Fix
-    -> full non-modal per-app editor
-
-  CLICK ELSEWHERE IN DISCORD
-    -> editor closes
-
-No browser-native white <select> dropdowns are used in the stream menu.
-
-RenoDX / ReShade is now customizable per application.
-
-Vencord -> Plugins -> DiscordHDRFix also contains a full per-app profile manager.
-
-Stream identity now accepts window:<HWND> source ids without requiring a second
-colon, so profiles should resolve to real executables instead of raw window IDs.
+v1.2.2:
+  - restores the proven direct setGoLiveSource hook
+  - keeps the runtime MediaEngine hook as fallback
+  - always shows the row when Discord's active stream menu is present
+  - displays "Detecting active stream…" until identity resolves

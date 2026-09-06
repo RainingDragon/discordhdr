@@ -1,96 +1,39 @@
-# DiscordHDRFix v1.2.1 — Discord-style Stream UI
+# DiscordHDRFix v1.2.2 — Stream UI Fix
 
-This revision keeps the v1.2 per-application profile system and replaces the
-browser-native form that was appended to Discord's stream popout.
+v1.2.1 could hide the Discord HDR Fix row entirely when the runtime
+MediaEngine source hook did not receive the active Go Live source.
 
-## Stream menu behavior
+v1.2.2 fixes that in two ways:
 
-While streaming, Discord's normal Go Live menu gains one compact row:
+1. Restores the proven webpack `setGoLiveSource()` / `clearDesktopSource()`
+   commit hooks from v1.2.0.
+2. Keeps the v1.2.1 runtime MediaEngine hook as a second fallback.
 
-```text
-Discord HDR Fix          >
-Automatic · 10-bit HDR
-```
+The Discord HDR Fix row now appears whenever the active stream menu is detected,
+even while application identity is still resolving.
 
-### Hover
-
-Hovering the row opens a lightweight quick-profile flyout:
+If source resolution has not happened yet, the row displays:
 
 ```text
-Automatic
-SDR
-Native HDR10
-scRGB
-RenoDX / ReShade
-Custom
+Discord HDR Fix
+Detecting active stream…
 ```
 
-This is intended for fast profile changes without opening the full editor.
+Hover/click remains usable and shows a nonblocking diagnostic state instead of
+silently omitting the feature.
 
-### Click
-
-Clicking the row opens a non-modal side editor. It does not install a page-sized
-overlay and it does not lock Discord. Clicking anywhere else in Discord closes
-the editor.
-
-The editor contains:
-
-- active streamed application
-- detected format
-- applied correction
-- profile preset
-- RenoDX/ReShade or Custom primaries
-- transfer function
-- HDR metadata policy
-- SDR white
-- input maximum
-- reset to Automatic
-
-The flyouts use Discord theme variables, floating-background/elevation tokens,
-compact menu spacing and short scale/fade transitions instead of native HTML
-`<select>` controls.
-
-## RenoDX / ReShade
-
-The RenoDX / ReShade preset is now **a customizable per-application profile**.
-
-Its initial values remain:
+Status now also reports:
 
 ```text
-Rec.2020
-sRGB
-Inject metadata
-360 / 200
+Candidate sources cached
+Runtime connections hooked
 ```
 
-Changing those fields does not turn the app into some unrelated global custom
-mode and does not affect other games.
+All v1.2.1 behavior remains:
 
-## Plugin settings
-
-Vencord's normal DiscordHDRFix plugin settings now include a profile manager for
-every application that has actually been streamed.
-
-The profile manager uses Discord/Vencord Select, TextInput and Button
-components, and can:
-
-- select a previously streamed app
-- change its profile
-- customize RenoDX/ReShade or Custom settings
-- reset it to Automatic
-- forget its profile
-
-## Stream identity fix
-
-Discord sometimes supplies capture IDs in the form:
-
-```text
-window:37293266
-```
-
-rather than a form containing another trailing colon. The HWND -> PID resolver
-now accepts both variants, so future profiles should resolve to the actual
-executable rather than displaying the raw `window:...` source id.
-
-Existing unresolved profiles are migrated when the same source later resolves
-to its executable.
+- Discord-themed hover quick menu
+- click-to-open non-modal editor
+- outside-click dismiss
+- per-app profile manager in plugin settings
+- customizable RenoDX / ReShade profiles
+- HWND -> PID executable resolution

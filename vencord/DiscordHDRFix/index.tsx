@@ -1353,9 +1353,6 @@ function openQuickFlyout(): void {
     const profile =
         getActiveProfile();
 
-    if (!profile)
-        return;
-
     if (quickCloseTimer != null) {
         clearTimeout(
             quickCloseTimer
@@ -1389,20 +1386,33 @@ function openQuickFlyout(): void {
         "vc-hdrfix-flyout-header";
 
     header.textContent =
-        profile.displayName;
+        profile?.displayName ?? "Discord HDR Fix";
 
     flyout.appendChild(header);
 
-    for (
-        const option
-        of PROFILE_OPTIONS
-    ) {
-        flyout.appendChild(
-            quickPresetButton(
-                profile,
-                option
-            )
-        );
+    if (profile) {
+        for (
+            const option
+            of PROFILE_OPTIONS
+        ) {
+            flyout.appendChild(
+                quickPresetButton(
+                    profile,
+                    option
+                )
+            );
+        }
+    } else {
+        const waiting =
+            document.createElement("div");
+
+        waiting.className =
+            "vc-hdrfix-waiting";
+
+        waiting.textContent =
+            "Waiting for Discord to report the active streamed application…";
+
+        flyout.appendChild(waiting);
     }
 
     const footer =
@@ -1412,7 +1422,9 @@ function openQuickFlyout(): void {
         "vc-hdrfix-quick-footer";
 
     footer.innerHTML =
-        `<span>${describeFormat(nativeStatus)}</span><span>${activeConfigDescription()}</span>`;
+        profile
+            ? `<span>${describeFormat(nativeStatus)}</span><span>${activeConfigDescription()}</span>`
+            : `<span>${describeFormat(nativeStatus)}</span><span>Source identity not resolved yet</span>`;
 
     flyout.appendChild(footer);
 
@@ -1601,12 +1613,77 @@ function renderEditorContents(
     const profile =
         getActiveProfile();
 
+    panel.innerHTML = "";
+
     if (!profile) {
-        closeEditorFlyout();
+        const header =
+            document.createElement("div");
+
+        header.className =
+            "vc-hdrfix-editor-header";
+
+        const titleWrap =
+            document.createElement("div");
+
+        titleWrap.className =
+            "vc-hdrfix-editor-title-wrap";
+
+        const title =
+            document.createElement("div");
+
+        title.className =
+            "vc-hdrfix-editor-title";
+
+        title.textContent =
+            "Discord HDR Fix";
+
+        const subtitle =
+            document.createElement("div");
+
+        subtitle.className =
+            "vc-hdrfix-editor-subtitle";
+
+        subtitle.textContent =
+            "Detecting the active streamed application…";
+
+        titleWrap.appendChild(title);
+        titleWrap.appendChild(subtitle);
+
+        const close =
+            document.createElement("button");
+
+        close.type = "button";
+        close.className =
+            "vc-hdrfix-close-button";
+        close.textContent = "×";
+
+        close.addEventListener(
+            "click",
+            event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeEditorFlyout();
+            }
+        );
+
+        header.appendChild(titleWrap);
+        header.appendChild(close);
+        panel.appendChild(header);
+
+        const waiting =
+            document.createElement("div");
+
+        waiting.className =
+            "vc-hdrfix-editor-waiting";
+
+        waiting.innerHTML = `
+            <strong>Stream source not resolved yet</strong>
+            <span>The menu is hooked, but DiscordHDRFix has not received the active Go Live source. The direct and runtime source hooks are both enabled in this build.</span>
+        `;
+
+        panel.appendChild(waiting);
         return;
     }
-
-    panel.innerHTML = "";
 
     const header =
         document.createElement("div");
@@ -1874,12 +1951,8 @@ function openEditorFlyout(): void {
     const profile =
         getActiveProfile();
 
-    if (
-        !profile ||
-        !streamMenuRow
-    ) {
+    if (!streamMenuRow)
         return;
-    }
 
     closeQuickFlyout();
 
@@ -2020,12 +2093,6 @@ function refreshStreamMenuUi(): void {
     const profile =
         getActiveProfile();
 
-    if (!profile) {
-        closeAllHdrFixMenus();
-        removeStreamMenuRow();
-        return;
-    }
-
     const container =
         findStreamSettingsContainer();
 
@@ -2066,7 +2133,9 @@ function refreshStreamMenuUi(): void {
 
     if (value) {
         value.textContent =
-            `${profileKindLabel(profile.kind)} · ${describeFormat(nativeStatus)}`;
+            profile
+                ? `${profileKindLabel(profile.kind)} · ${describeFormat(nativeStatus)}`
+                : "Detecting active stream…";
     }
 
     if (editorFlyout) {
@@ -2122,7 +2191,7 @@ function combinedStatus(): string {
             : null;
 
     return [
-        "DiscordHDRFix v1.2.1 Discord-style UI",
+        "DiscordHDRFix v1.2.2 stream UI fix",
         "----------------------------------------",
         `Active stream:                 ${activeStream?.displayName ?? "<none>"}`,
         `Active executable:             ${activeStream?.exeName ?? "<unresolved>"}`,
@@ -2132,6 +2201,8 @@ function combinedStatus(): string {
         `Applied mode:                  ${config?.mode ?? "observe"}`,
         `Applied reason:                ${config?.reason ?? "No active stream"}`,
         `Logged streamed applications:  ${Object.keys(profiles.apps).length}`,
+        `Candidate sources cached:      ${candidateSources.size}`,
+        `Runtime connections hooked:    ${hookedConnections.size}`,
         "",
         "Capture routing",
         `HDR:                           ${fmt(captureState.originalHdr)} -> ${fmt(captureState.effectiveHdr)}`,
@@ -2514,6 +2585,37 @@ export default definePlugin({
                     noWarn: true
                 }
             ]
+        },
+
+        // Proven stream-commit hook from v1.2.0. Keep the runtime MediaEngine
+        // hook as a fallback too; confirmGoLiveOptions() is idempotent enough
+        // because activateActualStream serializes the latest selection.
+        {
+            find: ".setGoLiveSource(",
+            all: true,
+            replacement: [
+                {
+                    match:
+                        /([A-Za-z_$][\w$]*)\.setGoLiveSource\(([A-Za-z_$][\w$]*)\)/g,
+                    replace:
+                        "$1.setGoLiveSource($self.observeGoLiveOptions($2))",
+                    noWarn: true
+                }
+            ]
+        },
+
+        {
+            find: ".clearDesktopSource(",
+            all: true,
+            replacement: [
+                {
+                    match:
+                        /([A-Za-z_$][\w$]*)\.clearDesktopSource\(\)/g,
+                    replace:
+                        "($self.onStreamEnded(),$1.clearDesktopSource())",
+                    noWarn: true
+                }
+            ]
         }
     ],
 
@@ -2521,6 +2623,14 @@ export default definePlugin({
         return cacheCandidateSource(
             source
         );
+    },
+
+    observeGoLiveOptions(options: any): any {
+        return confirmGoLiveOptions(options);
+    },
+
+    onStreamEnded(): void {
+        streamEnded();
     },
 
     forceSdrMode(original: unknown): "never" {

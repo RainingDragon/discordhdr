@@ -1618,7 +1618,7 @@ void WriteStatus() {
         capacity,
         used,
         "{\n"
-        "  \"version\": \"1.2.1-discord-ui\",\n"
+        "  \"version\": \"1.2.2-stream-ui-fix\",\n"
         "  \"pid\": %lu,\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"

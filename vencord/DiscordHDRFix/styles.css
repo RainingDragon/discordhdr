@@ -485,3 +485,34 @@
     flex-wrap: wrap;
     gap: 8px;
 }
+
+
+.vc-hdrfix-waiting {
+    padding: 10px 9px 11px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.vc-hdrfix-editor-waiting {
+    margin: 12px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border-radius: 6px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-accent);
+}
+
+.vc-hdrfix-editor-waiting strong {
+    color: var(--text-normal);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.vc-hdrfix-editor-waiting span {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 15px;
+}
