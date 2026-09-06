@@ -1,31 +1,27 @@
-DiscordHDRFix v1.1.0 DEV HOST
-================================
+DiscordHDRFix v1.2.0 PER-APPLICATION PROFILES
+===============================================
 
-This build combines the path tracer and hot-swappable HDR correction engine.
+Every newly streamed application starts Automatic.
 
-Install once. Then normal experiments do NOT require rebuilding.
+DiscordHDRFix logs ONLY applications you actually stream, not every application
+Discord shows in the picker.
 
-Default:
-  Mode = Observe only
-  Trace = ON
-  SDR white = 460
-  Input max = 1000
+Automatic:
+  format 28 -> SDR
+  format 24 -> Native HDR10 (460 / 1000)
+  format 10 -> scRGB (460 / 1000)
+  unknown   -> preserve / observe
 
-Use:
-  Vencord Toolbox -> Show Native Dev Host Status
+Per-app profiles:
+  Automatic
+  SDR
+  Native HDR10
+  scRGB
+  RenoDX / ReShade
+  Custom
 
-Caller rules can be edited live in the plugin:
+While streaming, open Discord's normal Stream Settings / Change Windows popout.
+A Discord HDR Fix section should appear there.
 
-  callerRva,format|any,metadata(any|null|nonnull),action
-
-Example:
-  0x3fd467,24,null,hdr10
-
-Actions:
-  preserve
-  sdr
-  hdr10
-  scrgb
-  metadata
-
-Changes reload in about 250 ms.
+Profiles:
+  %LOCALAPPDATA%\DiscordHDRFix\profiles.json

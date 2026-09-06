@@ -98,3 +98,51 @@ metadata:  preserve / null / injected 12-byte metadata
 ```
 
 This is still metadata/interpretation testing only; it does not add a new GPU pixel shader.
+
+## v1.2.0 per-application profile architecture
+
+### Stream-scoped persistence
+
+Available capture sources may be materialized before the user chooses anything. `observeDesktopSource()` therefore only caches source metadata in memory. It never writes `profiles.json`.
+
+The persistence boundary is the actual `setGoLiveSource()` call:
+
+```text
+candidate DesktopSource
+  -> memory cache only
+
+setGoLiveSource(actual selection)
+  -> resolve PID/executable
+  -> create/update profile
+  -> apply active profile
+```
+
+This keeps the database limited to applications the user actually streams.
+
+### Profile precedence
+
+```text
+explicit per-app profile
+    >
+automatic format classifier
+    >
+observe/preserve when unknown
+```
+
+### Process identity
+
+Preferred:
+
+```text
+DesktopSource.sourcePid -> Get-Process -> executable basename
+```
+
+Fallback:
+
+```text
+desktopDescription.id (window:<HWND>:...) -> GetWindowThreadProcessId -> executable basename
+```
+
+### Stream controls
+
+The Vencord side mounts a small DOM control panel into Discord's visible stream-settings/change-window popout. The panel changes the active application's profile and rewrites the stable native host config live. The native renderer host remains process-global but receives only the currently active application's resolved settings.

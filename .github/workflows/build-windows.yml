@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix v1.1.1 Flexible Source Windows x64
+name: Build DiscordHDRFix v1.2.0 Per-App Profiles Windows x64
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v1.1.1-flex-source"
+          $root = "package\DiscordHDRFix-v1.2.0-per-app-profiles"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -61,8 +61,7 @@ jobs:
           Copy-Item "build\Release\DiscordHDRFix.Injector.exe" $native
           Copy-Item "build\Release\DiscordHDRFix.Native.dll" $native
 
-          Copy-Item "vencord\DiscordHDRFix\index.ts" $plugin
-          Copy-Item "vencord\DiscordHDRFix\native.ts" $plugin
+          Copy-Item "vencord\DiscordHDRFix\*" $plugin -Recurse -Force
 
           Copy-Item "Install-DiscordHDRFix.ps1" $root
           Copy-Item "Uninstall-DiscordHDRFix.ps1" $root
@@ -84,7 +83,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v1.1.1-flex-source-windows-x64
-          path: package/DiscordHDRFix-v1.1.1-flex-source
+          name: DiscordHDRFix-v1.2.0-per-app-profiles-windows-x64
+          path: package/DiscordHDRFix-v1.2.0-per-app-profiles
           if-no-files-found: error
           retention-days: 30

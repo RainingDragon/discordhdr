@@ -1618,7 +1618,7 @@ void WriteStatus() {
         capacity,
         used,
         "{\n"
-        "  \"version\": \"1.1.0-devhost\",\n"
+        "  \"version\": \"1.2.0-per-app-profiles\",\n"
         "  \"pid\": %lu,\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"

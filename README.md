@@ -1,64 +1,82 @@
-# DiscordHDRFix v1.1.1 — Flexible Source Interpretation
+# DiscordHDRFix v1.2.0 — Per-Application Profiles
 
-This build keeps the v1.1 shared-renderer dev host and adds one important capability:
-**primaries, transfer function, and HDR metadata can now be controlled independently.**
+This build moves DiscordHDRFix from one global correction to a stream-scoped profile system.
 
-That is specifically for sources such as RenoDX/ReShade where none of the coarse presets
-(SDR, HDR10, scRGB, metadata-only) match the captured encoding.
+## Stream-scoped logging
 
-## New live mode
+DiscordHDRFix does **not** create profiles for every installed, running, or available application.
 
-Choose:
+Discord may construct `DesktopSource` objects while showing the screen-share picker. Those are only cached in memory. A profile is created or updated only when Discord actually commits the selected source through `setGoLiveSource()`.
 
-```text
-Mode: Custom source interpretation
-```
-
-Then independently select:
+Profiles are stored at:
 
 ```text
-Primaries:
-  Preserve
-  Rec.709
-  Rec.2020
-  Arc
-
-Transfer:
-  Preserve
-  Linear
-  sRGB
-  ST.2084 / PQ
-
-HDR metadata:
-  Preserve
-  None
-  Inject 460 / 1000
+%LOCALAPPDATA%\DiscordHDRFix\profiles.json
 ```
 
-No stream restart is required when changing these settings.
+## Default behavior
 
-The existing white/peak calibration remains:
+Every newly streamed application starts as **Automatic**.
 
 ```text
-SDR white: 460
-Input max: 1000
+format 28 / R8G8B8A8
+  -> SDR / no HDR metadata
+
+format 24 / R10G10B10A2
+  -> Native HDR10 / Rec.2020 + PQ / 460 + 1000
+
+format 10 / R16G16B16A16_FLOAT
+  -> scRGB / Rec.709 + Linear / 460 + 1000
+
+unknown
+  -> Observe / preserve
 ```
 
-## Recommended Dawnwalker / RenoDX test sequence
+An application override takes precedence over Automatic and affects only that application.
 
-Keep metadata on **Inject** and compare:
+## Per-application presets
 
 ```text
-Rec.2020 + sRGB
-Rec.709  + PQ
-Rec.2020 + Linear
-Rec.709  + sRGB
+Automatic
+SDR
+Native HDR10
+scRGB
+RenoDX / ReShade
+Custom
 ```
 
-Then repeat the best transfer/gamut combination with metadata **None** if needed.
+The initial RenoDX/ReShade preset is the current Dawnwalker near-match:
 
-The purpose is to determine whether RenoDX's captured 10-bit surface is using a
-non-standard combination rather than assuming that `R10G10B10A2_UNORM` always means
-Rec.2020/PQ.
+```text
+Rec.2020
+sRGB
+Inject HDR metadata
+SDR white 360
+Input max 200
+```
 
-Caller rules can also use action `custom`, which applies the current custom settings.
+This does not change native-HDR games because it is stored per application.
+
+## Controls in Discord's stream UI
+
+While an application is actively being streamed, open Discord's normal stream-settings / Change Windows popout. DiscordHDRFix inserts a small **Discord HDR Fix** section into that popout.
+
+It displays the active application, detected source format, selected profile, and applied correction. The profile can be changed live without stopping Go Live.
+
+Custom exposes:
+
+```text
+Primaries
+Transfer
+HDR metadata policy
+SDR white
+Input max
+```
+
+`Reset this application to Automatic` returns only that application to automatic classification.
+
+## Application identity
+
+When Discord exposes `DesktopSource.sourcePid`, DiscordHDRFix caches it. The PID is not logged until that source is actually streamed.
+
+At the confirmed stream commit, the Vencord native helper resolves the executable name/path. If Discord did not expose a PID, the Windows source-id HWND is used with `GetWindowThreadProcessId` as a fallback.

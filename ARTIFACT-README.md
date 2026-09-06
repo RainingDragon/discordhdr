@@ -1,22 +1,35 @@
-# DiscordHDRFix v1.1.1 Flexible Source Interpretation
+# DiscordHDRFix v1.2.0 Per-App Profiles
 
-Install the compiled Actions artifact as usual.
+## Install
 
-For Dawnwalker/RenoDX:
+Fully exit Discord:
 
-```text
-Host mode: Custom source interpretation
-SDR white: 460
-Input max: 1000
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\Install-DiscordHDRFix.ps1
 ```
 
-Test the new Primaries / Transfer / HDR metadata dropdowns live. No restart or restream is required.
+Then start Discord and enable `DiscordHDRFix`.
 
-Start with metadata = Inject and compare:
+## Normal use
 
-1. Rec.2020 + sRGB
-2. Rec.709 + PQ
-3. Rec.2020 + Linear
-4. Rec.709 + sRGB
+Do nothing. Every application starts in **Automatic** mode.
 
-Use `Show Native Dev Host Status` to verify the effective values changed.
+DiscordHDRFix logs only applications you actually stream.
+
+## Override one application
+
+While streaming, open Discord's normal Stream Settings / Change Windows popout. A **Discord HDR Fix** section should appear with:
+
+```text
+Automatic
+SDR
+Native HDR10
+scRGB
+RenoDX / ReShade
+Custom
+```
+
+The choice is saved only for the current application and applies live.
+
+For Dawnwalker/RenoDX, use `RenoDX / ReShade` as the starting profile. It uses the current near-match of Rec.2020 + sRGB + injected metadata at 360 / 200 without changing the native-HDR 460 / 1000 baseline for other games.
