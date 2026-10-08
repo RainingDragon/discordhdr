@@ -16,7 +16,7 @@
 
 constexpr DWORD kExpectedTimeDateStamp = 0x6a95b8a4;
 constexpr DWORD kExpectedSizeOfImage = 0x00fd8000;
-constexpr std::uintptr_t kRendererWrapperRva = 0x0052cad0;
+constexpr std::uintptr_t kLegacyRendererWrapperRva = 0x0052cad0;
 constexpr std::size_t kPatchedPrologueSize = 16;
 
 constexpr std::size_t kSourceFormatOffset = 0x178;
@@ -152,6 +152,11 @@ volatile LONG g_lastMetadataWasNull = -1;
 HMODULE g_voiceModule = nullptr;
 std::uintptr_t g_voiceBase = 0;
 std::size_t g_voiceSize = 0;
+std::uintptr_t g_rendererWrapperRva = 0;
+DWORD g_voiceTimeDateStamp = 0;
+DWORD g_voiceImageSize = 0;
+unsigned g_verifiedCallsites = 0;
+char g_discoveryMethod[80] = "not-resolved";
 
 std::uint8_t* g_trampoline = nullptr;
 RendererFn g_originalRenderer = nullptr;
@@ -269,68 +274,224 @@ bool EqualBytes(
     return std::memcmp(address, expected, size) == 0;
 }
 
+// Semantic discovery recognizes a verified x64 ABI, not arbitrary common
+// prologue bytes. If Discord changes that ABI or structure layout we fail closed.
+bool ContainsBytes(const std::uint8_t* data, std::size_t length,
+                   const std::uint8_t* pattern, std::size_t patternSize) {
+    if (!patternSize || length < patternSize) return false;
+    for (std::size_t i = 0; i <= length - patternSize; ++i)
+        if (std::memcmp(data + i, pattern, patternSize) == 0) return true;
+    return false;
+}
+
+bool ContainsDescriptorOffset(const std::uint8_t* data, std::size_t length,
+                              std::uint32_t offset) {
+    const std::uint8_t bytes[4] = {
+        static_cast<std::uint8_t>(offset),
+        static_cast<std::uint8_t>(offset >> 8),
+        static_cast<std::uint8_t>(offset >> 16),
+        static_cast<std::uint8_t>(offset >> 24)
+    };
+    return ContainsBytes(data, length, bytes, sizeof(bytes));
+}
+
+bool IsUnwindFunctionStart(const std::uint8_t* module,
+                           const IMAGE_NT_HEADERS64* nt,
+                           std::uint32_t rva, std::size_t minLength) {
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (!dir.VirtualAddress || dir.Size < sizeof(RUNTIME_FUNCTION) ||
+        static_cast<std::uint64_t>(dir.VirtualAddress) + dir.Size >
+            nt->OptionalHeader.SizeOfImage) return false;
+    const auto* entries =
+        reinterpret_cast<const RUNTIME_FUNCTION*>(module + dir.VirtualAddress);
+    const std::size_t count = dir.Size / sizeof(RUNTIME_FUNCTION);
+    for (std::size_t i = 0; i < count; ++i)
+        if (entries[i].BeginAddress == rva &&
+            entries[i].EndAddress >= static_cast<std::uint64_t>(rva) + minLength)
+            return true;
+    return false;
+}
+
+bool HasDownstreamColorLayout(const std::uint8_t* text, std::size_t textSize,
+                              std::uint32_t textRva, std::uint32_t wrapperRva,
+                              const IMAGE_NT_HEADERS64* nt,
+                              const std::uint8_t* module) {
+    const std::size_t wrapperOffset = wrapperRva - textRva;
+    // The wrapper forwards the source to a GPU renderer. Verify all three
+    // descriptor field offsets in a CALLED function, not arbitrary .text bytes.
+    for (std::size_t i = wrapperOffset + 16;
+         i < wrapperOffset + 174 && i + 5 <= textSize; ++i) {
+        if (text[i] != 0xE8) continue;
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, text + i + 1, sizeof(displacement));
+        const std::int64_t target =
+            static_cast<std::int64_t>(textRva) + i + 5 + displacement;
+        if (target < textRva || target >=
+            static_cast<std::int64_t>(textRva) + textSize) continue;
+        const auto targetRva = static_cast<std::uint32_t>(target);
+        if (!IsUnwindFunctionStart(module, nt, targetRva, 800)) continue;
+        const auto offset = static_cast<std::size_t>(target - textRva);
+        const auto remaining = std::min<std::size_t>(2500, textSize - offset);
+        const auto* body = text + offset;
+        if (ContainsDescriptorOffset(body, remaining, 0x178) &&
+            ContainsDescriptorOffset(body, remaining, 0x17c) &&
+            ContainsDescriptorOffset(body, remaining, 0x17d))
+            return true;
+    }
+    return false;
+}
+
+unsigned CountVerifiedRendererCallsites(const std::uint8_t* text,
+                                         std::size_t textSize,
+                                         std::uint32_t textRva,
+                                         std::uint32_t wrapperRva) {
+    unsigned verified = 0;
+    for (std::size_t i = 0; i + 5 <= textSize; ++i) {
+        if (text[i] != 0xE8) continue;
+        std::int32_t displacement = 0;
+        std::memcpy(&displacement, text + i + 1, sizeof(displacement));
+        const std::int64_t target =
+            static_cast<std::int64_t>(textRva) + i + 5 + displacement;
+        if (target != wrapperRva) continue;
+        // Each known caller supplies argument nine (HDR metadata) through
+        // [rsp+40h], as required by the Microsoft x64 calling convention.
+        const auto begin = i > 96 ? i - 96 : 0;
+        for (std::size_t j = begin; j + 5 <= i; ++j) {
+            if ((text[j] == 0x48 || text[j] == 0x4c) &&
+                text[j + 1] == 0x89 &&
+                (text[j + 2] & 0xC7) == 0x44 &&
+                text[j + 3] == 0x24 && text[j + 4] == 0x40) {
+                ++verified;
+                break;
+            }
+        }
+    }
+    return verified;
+}
+
 bool VerifyDiscordBuild(HMODULE voice) {
     auto* base = reinterpret_cast<std::uint8_t*>(voice);
-
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        SetSignature("DOS header mismatch");
-        SetError("invalid discord_voice.node DOS header");
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+        dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) {
+        SetSignature("invalid PE DOS header");
+        SetError("Native module has an invalid DOS header");
         return false;
     }
-
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(
-        base + dos->e_lfanew
-    );
-
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE ||
-        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-        SetSignature("PE header mismatch");
-        SetError("invalid discord_voice.node PE32+ header");
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+        SetSignature("invalid x64 PE header");
+        SetError("Native module has an invalid x64 PE header");
         return false;
     }
 
-    if (nt->FileHeader.TimeDateStamp != kExpectedTimeDateStamp ||
-        nt->OptionalHeader.SizeOfImage != kExpectedSizeOfImage) {
-        SetSignature("unsupported discord_voice.node build");
-        SetError("Discord build changed; dev host refused to patch");
-        return false;
-    }
+    const DWORD stamp = nt->FileHeader.TimeDateStamp;
+    const DWORD imageSize = nt->OptionalHeader.SizeOfImage;
+    g_voiceTimeDateStamp = stamp;
+    g_voiceImageSize = imageSize;
 
-    constexpr std::uint8_t wrapperPrologue[kPatchedPrologueSize] = {
-        0x41, 0x57,
-        0x41, 0x56,
-        0x41, 0x55,
-        0x41, 0x54,
-        0x56,
-        0x57,
-        0x55,
-        0x53,
-        0x48, 0x83, 0xec, 0x68
+    constexpr std::uint8_t oldPrologue[kPatchedPrologueSize] = {
+        0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+        0x56, 0x57, 0x55, 0x53, 0x48, 0x83, 0xEC, 0x68
     };
 
-    auto* wrapper = base + kRendererWrapperRva;
+    std::uintptr_t located = 0;
+    // Retain support for the original fully analyzed build.
+    if (stamp == kExpectedTimeDateStamp &&
+        imageSize == kExpectedSizeOfImage &&
+        kLegacyRendererWrapperRva + sizeof(oldPrologue) <= imageSize &&
+        EqualBytes(base + kLegacyRendererWrapperRva, oldPrologue,
+                   sizeof(oldPrologue))) {
+        located = kLegacyRendererWrapperRva;
+        strcpy_s(g_discoveryMethod, "verified-legacy-build");
+    } else {
+        // This extended prefix preserves the four register arguments and the
+        // old nonvolatile push/sub-rsp structure. The first 16 bytes alone
+        // occur in 180 places in the uploaded module and are NOT sufficient.
+        constexpr std::uint8_t abiSignature[] = {
+            0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+            0x56, 0x57, 0x55, 0x53, 0x48, 0x83, 0xEC, 0x68,
+            0x4C, 0x89, 0xCF, 0x4C, 0x89, 0xC3,
+            0x49, 0x89, 0xD6, 0x48, 0x89, 0xCE
+        };
+        constexpr std::uint8_t ninthArgumentLoad[] = {
+            0x48, 0x8B, 0xAC, 0x24, 0xF0, 0x00, 0x00, 0x00
+        };
+        const IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+        const std::uint8_t* text = nullptr;
+        std::uint32_t textRva = 0;
+        std::size_t textSize = 0;
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+            const auto& section = sections[i];
+            if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+                std::memcmp(section.Name, ".text", 5) == 0 &&
+                section.VirtualAddress < imageSize) {
+                textRva = section.VirtualAddress;
+                textSize = std::min<std::size_t>(
+                    section.Misc.VirtualSize,
+                    imageSize - section.VirtualAddress);
+                text = base + textRva;
+                break;
+            }
+        }
+        if (!text || textSize < 256) {
+            SetSignature("no executable .text");
+            SetError("Cannot validate renderer code section");
+            return false;
+        }
 
-    if (!EqualBytes(
-            wrapper,
-            wrapperPrologue,
-            sizeof(wrapperPrologue))) {
-        SetSignature("shared renderer signature mismatch");
-        SetError("renderer prologue changed; dev host refused to patch");
-        return false;
+        std::uint32_t candidateRva = 0;
+        unsigned candidateCount = 0;
+        for (std::size_t i = 0; i + sizeof(abiSignature) <= textSize; ++i) {
+            if (std::memcmp(text + i, abiSignature, sizeof(abiSignature)) != 0)
+                continue;
+            ++candidateCount;
+            candidateRva = textRva + static_cast<std::uint32_t>(i);
+            if (candidateCount > 1) break;
+        }
+        if (candidateCount != 1) {
+            SetSignature("renderer ABI not uniquely recognized");
+            SetError(candidateCount
+                ? "Ambiguous renderer signature; no hook installed"
+                : "Unknown renderer ABI; no hook installed");
+            return false;
+        }
+
+        const auto offset = candidateRva - textRva;
+        // The metadata pointer is the ninth parameter. An ABI change must
+        // never be silently accepted.
+        if (offset + 80 > textSize ||
+            std::memcmp(text + offset + 36,
+                        ninthArgumentLoad, sizeof(ninthArgumentLoad)) != 0 ||
+            !IsUnwindFunctionStart(base, nt, candidateRva, 128) ||
+            !HasDownstreamColorLayout(text, textSize, textRva,
+                                      candidateRva, nt, base)) {
+            SetSignature("renderer ABI validation failed");
+            SetError("Renderer argument/layout validation failed; no hook installed");
+            return false;
+        }
+
+        const unsigned verified = CountVerifiedRendererCallsites(
+            text, textSize, textRva, candidateRva);
+        if (verified < 2) {
+            SetSignature("renderer caller validation failed");
+            SetError("Not enough validated metadata callsites; no hook installed");
+            return false;
+        }
+        g_verifiedCallsites = verified;
+        located = candidateRva;
+        strcpy_s(g_discoveryMethod, "validated-abi-signature");
     }
 
-    std::memcpy(
-        g_originalPrologue,
-        wrapperPrologue,
-        sizeof(g_originalPrologue)
-    );
-
+    g_rendererWrapperRva = located;
+    std::memcpy(g_originalPrologue, base + located,
+                sizeof(g_originalPrologue));
     g_voiceModule = voice;
     g_voiceBase = reinterpret_cast<std::uintptr_t>(base);
-    g_voiceSize = nt->OptionalHeader.SizeOfImage;
-
-    SetSignature("matched exact analyzed shared renderer wrapper");
+    g_voiceSize = imageSize;
+    SetSignature("validated shared renderer wrapper");
     SetError("");
     return true;
 }
@@ -355,7 +516,7 @@ void WriteAbsoluteIndirectJump(
 
 bool BuildTrampoline(HMODULE voice) {
     auto* base = reinterpret_cast<std::uint8_t*>(voice);
-    auto* wrapper = base + kRendererWrapperRva;
+    auto* wrapper = base + g_rendererWrapperRva;
 
     constexpr SIZE_T trampolineSize = 64;
 
@@ -881,7 +1042,7 @@ void* __fastcall HookRenderer(
 
 bool PatchRendererEntry(HMODULE voice) {
     auto* base = reinterpret_cast<std::uint8_t*>(voice);
-    auto* wrapper = base + kRendererWrapperRva;
+    auto* wrapper = base + g_rendererWrapperRva;
 
     if (!BuildTrampoline(voice))
         return false;
@@ -1618,11 +1779,15 @@ void WriteStatus() {
         capacity,
         used,
         "{\n"
-        "  \"version\": \"1.2.3-ui-polish\",\n"
+        "  \"version\": \"1.3.0-compatible-renderer\",\n"
         "  \"pid\": %lu,\n"
         "  \"hook_installed\": %s,\n"
         "  \"signature\": \"%s\",\n"
-        "  \"renderer_wrapper_rva\": \"0x52cad0\",\n"
+        "  \"renderer_wrapper_rva\": \"0x%llx\",\n"
+        "  \"discovery_method\": \"%s\",\n"
+        "  \"voice_timestamp\": \"0x%08lx\",\n"
+        "  \"voice_image_size\": \"0x%08lx\",\n"
+        "  \"verified_renderer_callsites\": %u,\n"
         "  \"config_generation\": %u,\n"
         "  \"config_enabled\": %s,\n"
         "  \"host_mode\": \"%s\",\n"
@@ -1665,6 +1830,11 @@ void WriteStatus() {
             ? "true"
             : "false",
         g_signature,
+        static_cast<unsigned long long>(g_rendererWrapperRva),
+        g_discoveryMethod,
+        static_cast<unsigned long>(g_voiceTimeDateStamp),
+        static_cast<unsigned long>(g_voiceImageSize),
+        g_verifiedCallsites,
         c.generation,
         c.enabled ? "true" : "false",
         HostModeName(c.mode),
