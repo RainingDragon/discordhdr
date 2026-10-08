@@ -2450,7 +2450,7 @@ function combinedStatus(): string {
             : null;
 
     return [
-        "DiscordHDRFix v1.2.3 UI polish",
+        "DiscordHDRFix v1.3.0 compatible renderer",
         "----------------------------------------",
         `Active stream:                 ${activeStream?.displayName ?? "<none>"}`,
         `Active executable:             ${activeStream?.exeName ?? "<unresolved>"}`,
