@@ -1,4 +1,4 @@
-name: Build DiscordHDRFix v1.2.3 UI Polish Windows x64
+name: Build DiscordHDRFix v1.3.0 Compatible Renderer Windows x64
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $root = "package\DiscordHDRFix-v1.2.3-ui-polish"
+          $root = "package\DiscordHDRFix-v1.3.0-compatibility"
           $native = Join-Path $root "native"
           $plugin = Join-Path $root "vencord\DiscordHDRFix"
 
@@ -83,7 +83,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DiscordHDRFix-v1.2.3-ui-polish-windows-x64
-          path: package/DiscordHDRFix-v1.2.3-ui-polish
+          name: DiscordHDRFix-v1.3.0-compatibility-windows-x64
+          path: package/DiscordHDRFix-v1.3.0-compatibility
           if-no-files-found: error
           retention-days: 30
